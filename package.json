@@ -1,0 +1,22 @@
+{
+  "name": "the-api-routings",
+  "version": "0.3.1",
+  "license": "MIT",
+  "author": "Dimitry Ivanov <2@ivanoff.org.ua> # curl -A cv ivanoff.org.ua",
+  "description": "Routings for the-api",
+  "keywords": ["the-api", "routings"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node --external hono --external flattening --external knex && bunx tsc"
+  },
+  "dependencies": {
+    "flattening": "^2.4.3",
+    "hono": "^4.12.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.19.33",
+    "knex": "^3.1.0"
+  }
+}
