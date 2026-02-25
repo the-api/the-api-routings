@@ -4,6 +4,10 @@
   "license": "MIT",
   "author": "Dimitry Ivanov <2@ivanoff.org.ua> # curl -A cv ivanoff.org.ua",
   "description": "Routings for the-api",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ivanoff/the-api-routings"
+  },
   "keywords": ["the-api", "routings"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
