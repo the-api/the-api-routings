@@ -506,7 +506,7 @@ MIT © [Dimitry Ivanov](https://github.com/ivanoff)
 ```json
 {
   "name": "the-api-routings",
-  "version": "0.3.1",
+  "version": "0.4.1",
   "license": "MIT",
   "author": "Dimitry Ivanov <2@ivanoff.org.ua> # curl -A cv ivanoff.org.ua",
   "description": "Routings for the-api",
@@ -748,11 +748,26 @@ out
 ### src/CrudBuilder.ts
 ```ts
 import flattening from 'flattening';
-import type { CrudBuilderOptionsType, CrudBuilderPermissionsType, DbTablesType, MethodsType, getResultType, metaType, stringRecordType, whereParamsType } from "./types";
-import type { Context } from 'hono';
+import type {
+  ActionFlags,
+  AccessRecord,
+  AppContext,
+  ColumnInfoMap,
+  CrudAction,
+  CrudBuilderJoinType,
+  CrudBuilderOptionsType,
+  FieldRecord,
+  HiddenFieldsResult,
+  RequestState,
+  StringRecord,
+  UserType,
+  WhereParams,
+  getResultType,
+  metaType,
+} from './types';
 import type { Knex } from 'knex';
 
-const getPositiveIntFromEnv = (name: 'LIMIT_DEFAULT' | 'LIMIT_MAX') => {
+const getPositiveIntFromEnv = (name: 'LIMIT_DEFAULT' | 'LIMIT_MAX'): number | undefined => {
   const value = process.env[name];
   if (!value) return;
   const parsed = Number(value);
@@ -764,9 +779,9 @@ const getQueryLimit = ({
   _limit,
   _unlimited,
 }: {
-  _limit?: any;
-  _unlimited?: any;
-}) => {
+  _limit?: string | number;
+  _unlimited?: string | boolean;
+}): number | undefined => {
   const canGetUnlimited = process.env.CAN_GET_UNLIMITED === 'true';
   const isUnlimited = canGetUnlimited && (_unlimited === 'true' || _unlimited === true);
   if (isUnlimited) return;
@@ -774,297 +789,331 @@ const getQueryLimit = ({
   const defaultLimit = getPositiveIntFromEnv('LIMIT_DEFAULT');
   const maxLimit = getPositiveIntFromEnv('LIMIT_MAX');
 
-  let limit: any = _limit;
-  if ((typeof limit === 'undefined' || limit === null || limit === '') && typeof defaultLimit !== 'undefined') {
-    limit = defaultLimit;
-  }
+  let limit: number | undefined = _limit != null && _limit !== '' ? +_limit : defaultLimit;
+  if (!limit || Number.isNaN(limit)) return;
 
-  if (!limit) return;
-
-  const limitNumber = +limit;
-  if (typeof maxLimit !== 'undefined' && !Number.isNaN(limitNumber) && limitNumber > maxLimit) {
-    return maxLimit;
-  }
-
+  if (maxLimit && limit > maxLimit) return maxLimit;
   return limit;
 };
 
-export default class CrudBuilder {
-  c?: Context;
-  table: any;
-  schema: any;
-  aliases: stringRecordType;
-  join: any;
-  joinOnDemand: any;
-  leftJoin: any;
-  leftJoinDistinct: any;
-  lang: any;
-  translate: any;
-  searchFields: any;
+// FIX: positive integer validation
+const toPositiveInt = (value: unknown, fallback: number): number => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < fallback) return fallback;
+  return Math.floor(n);
+};
 
-  requiredFields: any;
-  defaultWhere: any;
-  defaultWhereRaw: any;
-  defaultSort: any;
-  sortRaw: any;
-  fieldsRaw: any;
-  tokenRequired: any;
-  ownerRequired: any;
-  rootRequired: any;
-  access: any;
-  accessByStatuses: any;
-  deletedReplacements: any;
-  includeDeleted: boolean;
+// -- FIX: action array -> flags helper ---------------------
 
-  hiddenFields?: string[];
-  readOnlyFields?: string[];
-  permissionViewableFields?: Record<string, string[]>;
-  permissionEditableFields?: Record<string, string[]>;
-  showFieldsByPermission?: Record<string, string[]>;
-  permissionCheckedMethods?: (MethodsType | '*')[];
-  replacedOwnerPermissions?: string[];
+const toActionFlags = (input?: CrudAction[]): ActionFlags =>
+  (input || []).reduce<ActionFlags>((acc, cur) => ({ ...acc, [cur]: true }), {});
 
-  cache: any;
-  userIdFieldName: any;
-  additionalFields: any;
-  apiClientMethodNames: any;
+// -- Class --------------------------------------------------
 
-  dbTables: DbTablesType;
-  coaliseWhere: any;
-  langJoin: any = {};
-  coaliseWhereReplacements: any;
-  user?: any;
-  res: any;
-  isOwner?: boolean;
-  rows: any;
-  relations?: Record<string, CrudBuilderOptionsType>;
-  roles: any;
-  permissions?: CrudBuilderPermissionsType;
-  ownerPermissions: Record<string, boolean>;
+export default class CrudBuilder<T extends Record<string, unknown> = Record<string, unknown>> {
 
-  constructor({
-    c,
-    table,
-    schema,
-    aliases,
-    join,
-    joinOnDemand,
-    leftJoin,
-    leftJoinDistinct,
-    lang,
-    translate,
-    searchFields,
-    hiddenFields,
-    readOnlyFields,
-    permissions,
-    requiredFields,
-    defaultWhere,
-    defaultWhereRaw,
-    defaultSort,
-    sortRaw,
-    fieldsRaw,
-    tokenRequired,
-    ownerRequired,
-    rootRequired,
-    access,
-    accessByStatuses,
-    dbTables,
-    deletedReplacements,
-    includeDeleted,
-    cache,
-    userIdFieldName,
-    additionalFields,
-    apiClientMethodNames,
-    relations,
-  }: CrudBuilderOptionsType) {
-    this.c = c;
-    this.table = table;
-    this.schema = schema || 'public';
-    this.aliases = aliases || {};
-    this.join = join || [];
-    this.joinOnDemand = joinOnDemand || [];
-    this.leftJoin = leftJoin || [];
-    this.leftJoinDistinct = !!leftJoinDistinct;
-    this.lang = lang || 'en';
-    this.translate = translate || [];
-    this.showFieldsByPermission = permissions?.fields?.viewable || {};
-    this.ownerPermissions = permissions?.owner?.reduce((acc, cur) => ({ ...acc, [cur]: true }) ,{}) || {};
-    this.readOnlyFields = readOnlyFields || ['id', 'timeCreated', 'timeUpdated', 'timeDeleted', 'isDeleted'];
-    this.requiredFields = requiredFields || {};
-    this.defaultWhere = defaultWhere || {};
-    this.defaultWhereRaw = defaultWhereRaw;
-    this.defaultSort = defaultSort;
-    this.sortRaw = sortRaw;
-    this.fieldsRaw = fieldsRaw;
-    this.tokenRequired = tokenRequired?.reduce((acc: any, cur: any) => ({ ...acc, [cur]: true }), {}) || {};
-    this.ownerRequired = ownerRequired?.reduce((acc: any, cur: any) => ({ ...acc, [cur]: true }), {}) || {};
-    this.rootRequired = rootRequired?.reduce((acc: any, cur: any) => ({ ...acc, [cur]: true }), {}) || {};
-    this.access = access || {};
-    this.accessByStatuses = accessByStatuses || {};
-    this.searchFields = searchFields || [];
-    this.dbTables = dbTables || {};
-    this.deletedReplacements = deletedReplacements;
-    this.includeDeleted = typeof includeDeleted === 'boolean' ? includeDeleted : !!this.deletedReplacements;
-    this.hiddenFields = hiddenFields || [];
-    this.coaliseWhere = {};
-    this.coaliseWhereReplacements = {};
-    this.cache = cache;
-    this.userIdFieldName = userIdFieldName || 'userId';
-    this.additionalFields = additionalFields || {};
-    this.apiClientMethodNames = apiClientMethodNames || {};
-    this.relations = relations;
+  // -- FIX: all config properties are `readonly` -----------
+  readonly table: string;
+  readonly schema: string;
+  readonly aliases: StringRecord;
+  readonly join: CrudBuilderJoinType[];
+  readonly joinOnDemand: CrudBuilderJoinType[];
+  readonly leftJoinConfig: [string, string, string][];
+  readonly leftJoinDistinct: boolean;
+  readonly defaultLang: string;
+  readonly translate: string[];
+  readonly searchFields: string[];
+  readonly requiredFields: Record<string, string>;
+  readonly defaultWhere: FieldRecord;
+  readonly defaultWhereRaw: string | undefined;
+  readonly defaultSort: string | undefined;
+  readonly sortRaw: string | undefined;
+  readonly fieldsRaw: string[] | undefined;
+  readonly tokenRequired: ActionFlags;
+  readonly ownerRequired: ActionFlags;
+  readonly rootRequired: ActionFlags;
+  readonly access: AccessRecord;
+  readonly accessByStatuses: AccessRecord;
+  readonly deletedReplacements: FieldRecord | undefined;
+  readonly includeDeleted: boolean;
+  readonly hiddenFields: string[];
+  readonly readOnlyFields: string[];
+  readonly showFieldsByPermission: Record<string, string[]>;
+  readonly ownerPermissions: Record<string, boolean>;
+  readonly dbTables: ColumnInfoMap;
+  readonly cache: { ttl?: number } | undefined;
+  readonly userIdFieldName: string;
+  readonly additionalFields: Partial<Record<string, Record<string, unknown>>>;
+  readonly apiClientMethodNames: StringRecord;
+  readonly relations: Record<string, CrudBuilderOptionsType> | undefined;
+
+  // -- FIX: per-request mutable state as single object -----
+  private state!: RequestState;
+
+  constructor(options: CrudBuilderOptionsType<T>) {
+    this.table = options.table;
+    this.schema = options.schema || 'public';
+    this.aliases = options.aliases || {};
+    this.join = options.join || [];
+    this.joinOnDemand = options.joinOnDemand || [];
+    this.leftJoinConfig = options.leftJoin || [];
+    this.leftJoinDistinct = !!options.leftJoinDistinct;
+    this.defaultLang = options.lang || 'en';
+    this.translate = options.translate || [];
+    this.searchFields = options.searchFields || [];
+    this.requiredFields = options.requiredFields || {};
+    this.defaultWhere = options.defaultWhere || {};
+    this.defaultWhereRaw = options.defaultWhereRaw;
+    this.defaultSort = options.defaultSort;
+    this.sortRaw = options.sortRaw;
+    this.fieldsRaw = options.fieldsRaw;
+    this.tokenRequired = toActionFlags(options.tokenRequired);
+    this.ownerRequired = toActionFlags(options.ownerRequired);
+    this.rootRequired = toActionFlags(options.rootRequired);
+    this.access = options.access || {};
+    this.accessByStatuses = options.accessByStatuses || {};
+    this.deletedReplacements = options.deletedReplacements;
+    this.includeDeleted = typeof options.includeDeleted === 'boolean'
+      ? options.includeDeleted
+      : !!options.deletedReplacements;
+    this.hiddenFields = options.hiddenFields || [];
+    this.readOnlyFields = options.readOnlyFields || ['id', 'timeCreated', 'timeUpdated', 'timeDeleted', 'isDeleted'];
+    this.showFieldsByPermission = options.permissions?.fields?.viewable || {};
+    this.ownerPermissions = options.permissions?.owner?.reduce<Record<string, boolean>>(
+      (acc, cur) => ({ ...acc, [cur]: true }),
+      {},
+    ) || {};
+    this.dbTables = options.dbTables || {};
+    this.cache = options.cache;
+    this.userIdFieldName = options.userIdFieldName || 'userId';
+    this.additionalFields = options.additionalFields || {};
+    this.apiClientMethodNames = options.apiClientMethodNames || {};
+    this.relations = options.relations;
   }
 
-  getDbWithSchema(db: Knex<any, unknown[]>) {
-    const result = db(this.table);
-    if (this.schema) result.withSchema(this.schema);
-    return result;
+  // -- State management ------------------------------------
+
+  private initState(c: AppContext): void {
+    const env = c.env;
+    this.state = {
+      res: this.getDbWithSchema(env.db),
+      rows: env.dbTables?.[`${this.schema}.${this.table}`] || {},
+      user: c.var?.user as UserType | undefined,
+      roles: env.roles,
+      lang: this.defaultLang,
+      coalesceWhere: {},
+      coalesceWhereReplacements: {},
+      langJoin: {},
+    };
   }
 
-  getTableRows(c: Context) {
-    return c.env.dbTables[`${this.schema}.${this.table}`] || {};
+  // -- DB helpers ------------------------------------------
+
+  private getDbWithSchema(db: Knex): Knex.QueryBuilder {
+    const qb = db(this.table);
+    if (this.schema) qb.withSchema(this.schema);
+    return qb;
   }
 
-  sort(sort: any, db: any) {
-    if (this.sortRaw) this.res.orderByRaw(this.sortRaw);
+  // -- FIX: SQL Injection - validate sort fields -----------
 
-    const _sort = sort || this.defaultSort;
+  private getKnownColumnNames(): Set<string> {
+    const names = new Set<string>();
+    for (const col of Object.keys(this.state.rows)) names.add(col);
+    for (const col of Object.keys(this.aliases)) names.add(col);
+    for (const j of this.join) names.add(j.alias || j.table);
+    for (const j of this.joinOnDemand) names.add(j.alias || j.table);
+    return names;
+  }
+
+  private isValidSortField(field: string): boolean {
+    const name = field.replace(/^-/, '');
+    if (/^random\(\)$/i.test(name)) return true;
+    return this.getKnownColumnNames().has(name);
+  }
+
+  // -- FIX: validate WHERE keys against known columns ------
+
+  private isValidWhereKey(key: string): boolean {
+    const cleanKey = key
+      .replace(/^(_null_|_not_null_|_in_|_not_in_|_from_|_to_)/, '')
+      .replace(/[!~]$/, '');
+    if (this.state.rows[cleanKey]) return true;
+    if (cleanKey.includes('.')) {
+      const col = cleanKey.split('.').pop() || '';
+      return !!this.state.rows[col];
+    }
+    if (this.state.coalesceWhere[cleanKey]) return true;
+    if (this.state.langJoin[cleanKey]) return true;
+    return false;
+  }
+
+  // -- Sort -------------------------------------------------
+
+  private sort(sortParam: string | undefined, db: Knex): void {
+    if (this.sortRaw) this.state.res.orderByRaw(this.sortRaw);
+
+    const _sort = sortParam || this.defaultSort;
     if (!_sort) return;
 
-    _sort.split(',').forEach((item: any) => {
-      if (item.match(/^random\(\)$/i)) return this.res.orderBy(db.raw('RANDOM()'));
+    for (const item of _sort.split(',')) {
+      if (/^random\(\)$/i.test(item)) {
+        this.state.res.orderBy(db.raw('RANDOM()') as unknown as string);
+        continue;
+      }
 
-      const match = item.match(/^(-)?(.*)$/);
-      this.res.orderBy(match[2], match[1] && 'desc', 'last');
-    });
-  }
+      // FIX: validate sort field against known columns
+      if (!this.isValidSortField(item)) continue;
 
-  pagination({
-    _page, _skip = 0, _limit, _unlimited,
-  }: any) {
-
-    const limit = getQueryLimit({ _limit, _unlimited });
-    if (!limit) return;
-
-    this.res.limit(limit);
-    const offset = _page ? (_page - 1) * limit : 0;
-    this.res.offset(offset + (+_skip));
-  }
-
-  whereNotIn(whereNotInObj: any) {
-    if (!whereNotInObj) return;
-
-    for (const [key, value] of Object.entries(whereNotInObj)) {
-      this.res.whereNotIn(key, value);
+      const match = item.match(/^(-)?(.+)$/);
+      if (!match) continue;
+      this.state.res.orderBy(match[2], match[1] ? 'desc' : 'asc', 'last');
     }
   }
 
-  where(whereObj: any, db: any) {
+  // -- Pagination ------------------------------------------
+
+  private pagination({
+    _page,
+    _skip = 0,
+    _limit,
+    _unlimited,
+  }: {
+    _page?: string | number;
+    _skip?: string | number;
+    _limit?: string | number;
+    _unlimited?: string | boolean;
+  }): void {
+    const limit = getQueryLimit({ _limit, _unlimited });
+    if (!limit) return;
+
+    this.state.res.limit(limit);
+
+    // FIX: validate page and skip as positive integers
+    const page = toPositiveInt(_page, 1);
+    const skip = toPositiveInt(_skip, 0);
+    const offset = (page - 1) * limit + skip;
+    this.state.res.offset(offset);
+  }
+
+  // -- Where -----------------------------------------------
+
+  private where(
+    whereObj: Record<string, unknown>,
+    db: Knex,
+    options?: { trusted?: boolean },
+  ): void {
     if (!whereObj) return;
+    const { trusted = false } = options || {};
 
     for (const [key, value] of Object.entries(whereObj)) {
-      if (this.langJoin[`${key}`]) {
-        this.res.whereRaw(`${this.langJoin[`${key}`]} = :_value`, { _value: value, lang: this.lang });
-      } else if (this.coaliseWhere[`${key}`] || this.coaliseWhere[`${key.replace(/!$/, '')}`]) {
+      // FIX: skip unknown columns from untrusted input
+      if (!trusted && !this.isValidWhereKey(key)) continue;
+
+      if (this.state.langJoin[key]) {
+        this.state.res.whereRaw(
+          `${this.state.langJoin[key]} = :_value`,
+          { _value: value, lang: this.state.lang },
+        );
+      } else if (this.state.coalesceWhere[key] || this.state.coalesceWhere[key.replace(/!$/, '')]) {
         const key2 = key.replace(/!$/, '');
-        const isNnot = key.match(/!$/) ? 'NOT' : '';
-        const coaliseWhere = this.coaliseWhere[`${key2}`];
-        const replacements = this.coaliseWhereReplacements;
+        const isNot = key.endsWith('!') ? 'NOT' : '';
+        const coalesceWhere = this.state.coalesceWhere[key2];
+        const replacements = this.state.coalesceWhereReplacements;
         if (Array.isArray(value)) {
           for (const _value of value) {
-            this.res.orWhere(function (this: Knex.QueryBuilder) {
-              this.whereRaw(`${isNnot} ${coaliseWhere} = :_value`, { ...replacements, _value });
+            this.state.res.orWhere(function (this: Knex.QueryBuilder) {
+              this.whereRaw(`${isNot} ${coalesceWhere} = :_value`, { ...replacements, _value });
             });
           }
         } else {
-          this.res.whereRaw(`${isNnot} ${coaliseWhere} = :_value`, { ...replacements, _value: value });
+          this.state.res.whereRaw(
+            `${isNot} ${coalesceWhere} = :_value`,
+            { ...replacements, _value: value },
+          );
         }
-      } else if (key.match(/~$/)) {
-        // iLike
-        this.res.where(key.replace(/~$/, ''), 'ilike', value);
-      } else if (key.match(/!$/)) {
+      } else if (key.endsWith('~')) {
+        this.state.res.where(key.replace(/~$/, ''), 'ilike', value as string);
+      } else if (key.endsWith('!')) {
+        const col = key.replace(/!$/, '');
         if (Array.isArray(value)) {
-          this.res.whereNotIn(key.replace(/!$/, ''), value);
+          this.state.res.whereNotIn(col, value);
         } else {
-          this.res.whereNot(key.replace(/!$/, ''), value);
+          this.state.res.whereNot(col, value as string);
         }
-      } else if (key.match(/^_null_/)) {
+      } else if (key.startsWith('_null_')) {
         const m = key.match(/^_null_(.+)$/);
-        this.res.whereNull(m?.[1]);
-      } else if (key.match(/^_in_/)) {
+        if (m) this.state.res.whereNull(m[1]);
+      } else if (key.startsWith('_in_')) {
         try {
           const m = key.match(/^_in_(.+)$/);
-          this.res.whereIn(m?.[1], JSON.parse(value as any));
+          if (m) this.state.res.whereIn(m[1], JSON.parse(value as string));
         } catch {
-          throw new Error('ERROR_QUERY_VALUE')
+          throw new Error('ERROR_QUERY_VALUE');
         }
-      } else if (key.match(/^_not_in_/)) {
+      } else if (key.startsWith('_not_in_')) {
         try {
           const m = key.match(/^_not_in_(.+)$/);
-          this.res.whereNotIn(m?.[1], JSON.parse(value as any));
+          if (m) this.state.res.whereNotIn(m[1], JSON.parse(value as string));
         } catch {
-          throw new Error('ERROR_QUERY_VALUE')
+          throw new Error('ERROR_QUERY_VALUE');
         }
-      } else if (key.match(/^_not_null_/)) {
+      } else if (key.startsWith('_not_null_')) {
         const m = key.match(/^_not_null_(.+)$/);
-        this.res.whereNotNull(m?.[1]);
-      } else if (key.match(/_(from|to)_/)) {
+        if (m) this.state.res.whereNotNull(m[1]);
+      } else if (/_(?:from|to)_/.test(key)) {
         if (value !== '') {
           const m = key.match(/_(from|to)_(.+)$/);
-          const sign = m?.[1] === 'from' ? '>=' : '<=';
-
-          const coaliseWhere = this.coaliseWhere[`${m?.[2]}`];
-          if (coaliseWhere) {
-            this.res.whereRaw(`${coaliseWhere} ${sign} ?`, [value]);
+          if (!m) continue;
+          const sign = m[1] === 'from' ? '>=' : '<=';
+          const coalesceWhere = this.state.coalesceWhere[m[2]];
+          if (coalesceWhere) {
+            this.state.res.whereRaw(`${coalesceWhere} ${sign} ?`, [value]);
           } else {
-            this.res.where(`${m?.[2]}`, sign, value);
+            this.state.res.where(m[2], sign, value as string);
           }
         }
       } else if (Array.isArray(value)) {
-        this.res.whereIn(key, value);
+        this.state.res.whereIn(key, value);
       } else if (value === null) {
-        this.res.whereNull(key);
-      } else if (this.leftJoin && !key.includes('.')) {
-        this.res.where({ [`${this.table}.${key}`]: value });
+        this.state.res.whereNull(key);
+      } else if (this.leftJoinConfig.length && !key.includes('.')) {
+        this.state.res.where({ [`${this.table}.${key}`]: value });
       } else {
-        this.res.where(key, value);
+        this.state.res.where(key, value as string);
       }
     }
   }
 
-  getHiddenFields() {
-    if (!this.roles) return { regular: this.hiddenFields, owner: this.hiddenFields };
+  // -- Fields / Joins --------------------------------------
 
-    const permissions = this.roles.getPermissions(this.user?.roles);
+  private fields({
+    c,
+    _fields,
+    _join,
+    db,
+    _sort,
+  }: {
+    c: AppContext;
+    _fields?: string;
+    _join?: string | string[];
+    db: Knex;
+    _sort?: string;
+  }): void {
+    let f = _fields?.split(',').filter((item) => item !== '-relations');
 
-    let toShow: string[] = [];
-    let ownerToShow: string[] = [];
-    for (const [key, value] of Object.entries(this.showFieldsByPermission)) {
-      const hasPermission = this.roles.checkWildcardPermissions({ key, permissions });
-      if (hasPermission) toShow = toShow.concat(value);
-      
-      const ownerHasPermission = this.roles.checkWildcardPermissions({ key, permissions: this.ownerPermissions });
-      if (ownerHasPermission) ownerToShow = ownerToShow.concat(value);
-    }
-
-    const regular = this.hiddenFields?.filter((item) => !toShow.includes(item)) || [];
-    const owner = this.hiddenFields?.filter((item) => !ownerToShow.includes(item)) || [];
-
-    return { regular, owner };
-  }
-
-  fields({
-    c, _fields, _join, db, _sort,
-  }: any) {
-    // this.updatehiddenFields(this.hiddenFields);
-    let f = _fields && _fields.split(',').filter((item) => item !== '-relations');
-
-    if (this.leftJoin.length) {
-      this.leftJoin.map((item: any) => this.res.leftJoin(...item));
+    if (this.leftJoinConfig.length) {
+      for (const item of this.leftJoinConfig) this.state.res.leftJoin(...item);
 
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || '').replace(/(^|,)-/g, ',').split(',').filter(Boolean);
-        this.res.distinct(!f ? [] : sortArr.map((item: any) => !f.includes(item) && `${this.table}.${item}`).filter(Boolean));
+        this.state.res.distinct(
+          !f
+            ? []
+            : sortArr
+                .map((item) => !f.includes(item) && `${this.table}.${item}`)
+                .filter(Boolean),
+        );
       }
     }
 
@@ -1073,168 +1122,263 @@ export default class CrudBuilder {
     if (_join) {
       const joinNames = Array.isArray(_join) ? _join : _join.split(',');
       for (const joinName of joinNames) {
-        const toJoin = this.joinOnDemand.filter(({ table, alias }: any) => joinName === alias || joinName === table );
-        if (toJoin.length) join = join.concat(toJoin.filter((j: any) => !join.find(({ table, alias }) => table === j.table && alias === j.alias)));
+        const toJoin = this.joinOnDemand.filter(
+          ({ table, alias }) => joinName === alias || joinName === table,
+        );
+        if (toJoin.length) {
+          join = join.concat(
+            toJoin.filter((j) => !join.find(({ table, alias }) => table === j.table && alias === j.alias)),
+          );
+        }
       }
     }
 
     if (f) {
-      join = join.filter(({ table, alias }: any) => f.includes(table) || f.includes(alias));
-      f = f.filter((name: string) => !join.find(({ table, alias}: any) => name === table || name === alias));
+      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
+      f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
 
-    let joinCoaleise = (f || Object.keys(this.rows))
-      // .filter((name: any) => !this.hiddenFields.includes(name))
-      .map((l: any) => `${this.table}.${l}`);
+    let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);
 
-    if (this.includeDeleted && this.deletedReplacements && this.rows.isDeleted) {
-      joinCoaleise = joinCoaleise.map((item: any) => {
+    if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
+      joinCoalesce = joinCoalesce.map((item) => {
         const [tableName, fieldName] = item.split('.');
-        const replaceWith = this.deletedReplacements[`${fieldName}`];
+        const replaceWith = this.deletedReplacements?.[fieldName];
         if (typeof replaceWith === 'undefined') return item;
-        return db.raw(`CASE WHEN "${this.table}"."isDeleted" THEN :replaceWith ELSE "${tableName}"."${fieldName}" END AS ${fieldName}`, { replaceWith });
+        return db.raw(
+          `CASE WHEN "${this.table}"."isDeleted" THEN :replaceWith ELSE "${tableName}"."${fieldName}" END AS ${fieldName}`,
+          { replaceWith },
+        ) as unknown as string;
       });
     }
 
     for (const field of Object.keys(this.aliases)) {
-      joinCoaleise.push(`${this.table}.${field} AS ${this.aliases[`${field}`]}`);
+      joinCoalesce.push(`${this.table}.${field} AS ${this.aliases[field]}`);
     }
 
-    if (this.lang && this.lang !== 'en') {
+    if (this.state.lang && this.state.lang !== 'en') {
       for (const field of this.translate) {
-        this.langJoin[`${field}`] = `COALESCE( (
+        this.state.langJoin[field] = `COALESCE( (
           select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}" 
+            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
-        joinCoaleise.push(db.raw(this.langJoin[`${field}`] + `AS "${field}"`, { lang: this.lang }));
+        joinCoalesce.push(
+          db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }) as unknown as string,
+        );
       }
     }
 
     for (const {
-      table, schema, as, where, whereBindings, alias, defaultValue, fields,
-      field, limit, orderBy, byIndex, leftJoin,
+      table,
+      schema,
+      as,
+      where: joinWhere,
+      whereBindings,
+      alias,
+      defaultValue,
+      fields: joinFields,
+      field,
+      limit,
+      orderBy,
+      byIndex,
+      leftJoin,
     } of join) {
       if (!table && field) {
-        joinCoaleise.push(db.raw(`${field} AS ${alias || field}`));
+        joinCoalesce.push(db.raw(`${field} AS ${alias || field}`) as unknown as string);
         continue;
       }
 
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : '';
       const limitStr = limit ? `LIMIT ${limit}` : '';
-      const lang = table === 'lang' && this.lang && this.lang.match(/^\w{2}$/) ? `AND lang='${this.lang}'` : '';
-      const ff = fields?.map((item: any) => (typeof item === 'string'
-        ? `'${item}', "${as || table}"."${item}"`
-        : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`));
+      const lang = table === 'lang' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
+      const ff = joinFields?.map((item) =>
+        typeof item === 'string'
+          ? `'${item}', "${as || table}"."${item}"`
+          : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`,
+      );
       const f2 = ff ? `json_build_object(${ff.join(', ')})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
-      const wb: any = {};
-      if (whereBindings) {
-        if (!c) continue;
-        const envAll = c.env;
-        const query = c.req.query();
-        const params = c.req.param();
-    
-        const env = { ...envAll };
-        [
-          'db',
-          'dbWrite',
-          'dbTables',
-          'error',
-          'getErrorByMessage',
-          'log',
-        ].map((key) => delete env[`${key}`]);
+      const wb: Record<string, unknown> = {};
 
-        const dd: any = flattening({ env, params, query });
-        for (const [k, v] of Object.entries(whereBindings)) wb[`${k}`] = dd[`${v}`] || null;
+      if (whereBindings) {
+        const envAll = { ...c.env } as Record<string, unknown>;
+        ['db', 'dbWrite', 'dbTables', 'error', 'getErrorByMessage', 'log']
+          .forEach((key) => delete envAll[key]);
+
+        const dd: Record<string, unknown> = flattening({
+          env: envAll,
+          params: c.req.param(),
+          query: c.req.query(),
+        }) as Record<string, unknown>;
+        for (const [k, v] of Object.entries(whereBindings)) {
+          wb[k] = dd[v] ?? null;
+        }
       }
 
-      const leftJoinStr = !leftJoin ? ''
-        : typeof leftJoin === 'string' ? `LEFT JOIN ${leftJoin}`
+      const leftJoinStr = !leftJoin
+        ? ''
+        : typeof leftJoin === 'string'
+          ? `LEFT JOIN ${leftJoin}`
           : `LEFT JOIN "${leftJoin[0]}" ON ${leftJoin[1]} = ${leftJoin[2]}`;
 
       const index = typeof byIndex === 'number' ? `[${byIndex}]` : '';
       const schemaStr = !schema ? '' : `"${schema}".`;
       const dValue = defaultValue ? `'${defaultValue}'` : 'NULL';
 
-      const coaliseWhere = `COALESCE( ( SELECT ${f3} FROM (
+      const coalesceWhere = `COALESCE( ( SELECT ${f3} FROM (
         SELECT * FROM ${schemaStr}"${table}" AS "${as || table}"
         ${leftJoinStr}
-        WHERE ${where} ${lang}
+        WHERE ${joinWhere} ${lang}
         ${orderByStr}
         ${limitStr}
       ) "${as || table}")${index}, ${dValue})`;
 
-      this.coaliseWhere = { ...this.coaliseWhere, [`${alias || table}`]: coaliseWhere };
-      this.coaliseWhereReplacements = { ...this.coaliseWhereReplacements, ...wb };
+      this.state.coalesceWhere[alias || table] = coalesceWhere;
+      this.state.coalesceWhereReplacements = {
+        ...this.state.coalesceWhereReplacements,
+        ...wb,
+      };
 
-      let sqlToJoin = `${coaliseWhere} AS "${alias || table}"`;
-      if (this.includeDeleted && this.deletedReplacements && this.rows.isDeleted) {
-        const replaceWith = this.deletedReplacements[`${table}`] || this.deletedReplacements[`${as}`] || this.deletedReplacements[`${alias}`];
+      let sqlToJoin = `${coalesceWhere} AS "${alias || table}"`;
+      if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
+        const replaceWith = this.deletedReplacements[table]
+          ?? (as ? this.deletedReplacements[as] : undefined)
+          ?? (alias ? this.deletedReplacements[alias] : undefined);
         if (typeof replaceWith !== 'undefined') {
-          sqlToJoin = `CASE WHEN "${this.table}"."isDeleted" THEN ${replaceWith} ELSE ${coaliseWhere} END AS "${alias || table}"`;
+          sqlToJoin = `CASE WHEN "${this.table}"."isDeleted" THEN ${replaceWith} ELSE ${coalesceWhere} END AS "${alias || table}"`;
         }
       }
 
-      joinCoaleise.push(db.raw(sqlToJoin, wb));
+      joinCoalesce.push(db.raw(sqlToJoin, wb) as unknown as string);
     }
 
     if (c.req.query()._search && this.searchFields.length) {
-      const searchColumnsStr = this.searchFields.map((name: any) => {
-        const searchName = this.langJoin[`${name}`] || `"${name}"`;
-        return `COALESCE(${searchName} <-> :_search, 1)`;
-        // return `COALESCE(${searchName} <-> :_search, 1) + COALESCE("${name}" <-> :_search, 1)`;
-      }).join(' + ');
-      joinCoaleise.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, {...c.req.query(), lang: this.lang }));
-      if (!_sort) this.res.orderBy('_search_distance', 'ASC');
+      const searchColumnsStr = this.searchFields
+        .map((name) => {
+          const searchName = this.state.langJoin[name] || `"${name}"`;
+          return `COALESCE(${searchName} <-> :_search, 1)`;
+        })
+        .join(' + ');
+      joinCoalesce.push(
+        db.raw(
+          `(${searchColumnsStr})/${this.searchFields.length} as _search_distance`,
+          { ...c.req.query(), lang: this.state.lang },
+        ) as unknown as string,
+      );
+      if (!_sort) this.state.res.orderBy('_search_distance', 'ASC');
     }
 
-    this.res.column(joinCoaleise.concat(this.fieldsRaw || []));
+    this.state.res.column(joinCoalesce.concat(this.fieldsRaw || []));
   }
 
-  checkDeleted() {
-    if (this.includeDeleted || !this.rows.isDeleted) return;
-    this.res.where({ [`${this.table}.isDeleted`]: false });
+  private checkDeleted(): void {
+    if (this.includeDeleted || !this.state.rows.isDeleted) return;
+    this.state.res.where({ [`${this.table}.isDeleted`]: false });
   }
 
-  getJoinFields() {
-    return this.join.reduce((acc: any, { alias, table, field }: any) => {
-      let type = !field && 'ARRAY';
-      if (!type) type = field.match(/::bool$/) && 'boolean';
-      if (!type) type = field.match(/::int$/) && 'integer';
-      if (!type) type = 'string';
-
+  private getJoinFields(): Record<string, string> {
+    return this.join.reduce<Record<string, string>>((acc, { alias, table, field }) => {
+      let type = !field
+        ? 'ARRAY'
+        : field.match(/::bool$/)
+          ? 'boolean'
+          : field.match(/::int$/)
+            ? 'integer'
+            : 'string';
       acc[alias || table] = type;
       return acc;
     }, {});
   }
 
-  deleteHiddenFieldsFromResult(result: any, hiddenFields: any) {
-    if (!hiddenFields) return;
+  private getHiddenFields(): HiddenFieldsResult {
+    if (!this.state.roles) {
+      return { regular: this.hiddenFields, owner: this.hiddenFields };
+    }
 
-    const isOwner = this.user?.id && result[`${this.userIdFieldName}`] === this.user?.id;
-    hiddenFields[isOwner ? 'owner' : 'regular'].map((key: string) => delete result[`${key}`]);
+    const permissions = this.state.roles.getPermissions(this.state.user?.roles);
+    let toShow: string[] = [];
+    let ownerToShow: string[] = [];
+
+    for (const [key, value] of Object.entries(this.showFieldsByPermission)) {
+      if (this.state.roles.checkWildcardPermissions({ key, permissions })) {
+        toShow = toShow.concat(value);
+      }
+      if (this.state.roles.checkWildcardPermissions({ key, permissions: this.ownerPermissions })) {
+        ownerToShow = ownerToShow.concat(value);
+      }
+    }
+
+    return {
+      regular: this.hiddenFields.filter((item) => !toShow.includes(item)),
+      owner: this.hiddenFields.filter((item) => !ownerToShow.includes(item)),
+    };
   }
 
-/** return data from table. Use '_fields', '_sort', '_start', '_limit' options
- * examples:
- * - second page, 1 record per page, sort by title desc, only id and title fields:
- *   /ships?_fields=id,title&_sort=-title&_page=2&_limit=1
- * - skip 100 records, get next 10 records: /ships?_skip=100&_limit=10
- * - search by id and title: /ships?_fields=title&id=2&title=second data
- * - search by multiply ids: /ships?_fields=id&id=1&id=3
- * - search where not: /ships?_fields=title&title!=_e%25 d_ta
- * - search by 'like' mask: /ships?_fields=title&title~=_e%25 d_ta
- * - search from-to: /ships?_from_year=2010&_to_year=2020
- */
+  private deleteHiddenFieldsFromResult(
+    result: Record<string, unknown> | undefined,
+    hiddenFields: HiddenFieldsResult,
+  ): void {
+    if (!result || !hiddenFields) return;
+    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const fields = hiddenFields[isOwner ? 'owner' : 'regular'];
+    for (const key of fields) delete result[key];
+  }
+
+  // -- FIX: data filtering shared by add + update ----------
+
+  private filterDataByTableColumns(
+    data: Record<string, unknown>,
+    rows: ColumnInfoMap,
+  ): Record<string, unknown> {
+    const filtered: Record<string, unknown> = {};
+    for (const key of Object.keys(data)) {
+      if (rows[key] && !this.readOnlyFields.includes(key)) {
+        filtered[key] = data[key];
+      }
+    }
+    return filtered;
+  }
+
+  private updateData(
+    c: AppContext,
+    data: Record<string, unknown>,
+  ): Record<string, unknown> {
+    for (const [key, errorCode] of Object.entries(this.requiredFields)) {
+      if (!data[key]) throw new Error(errorCode);
+    }
+
+    const rows = this.state.rows;
+
+    // FIX: removed `result = { ...c.req.param(), ...result }` - URL params must not merge into data
+    const filtered = this.filterDataByTableColumns(data, rows);
+
+    if (rows.userId && this.state.user) {
+      filtered.userId = this.state.user.id;
+    }
+
+    return filtered;
+  }
+
+  private updateIncomingData(
+    c: AppContext,
+    data: Record<string, unknown> | Record<string, unknown>[],
+  ): Record<string, unknown> | Record<string, unknown>[] {
+    return Array.isArray(data)
+      ? data.map((item) => this.updateData(c, item))
+      : this.updateData(c, data);
+  }
+
+  // -- Options (self-documenting) --------------------------
 
   optionsGet() {
-    const fields: any = {};
-    const fieldsSearchLike: any = {};
-    const fieldsFromTo: any = {};
-    const fieldsNull: any = {};
-    for (const [key, data] of Object.entries(this.dbTables || {})) {
+    const fields: Record<string, string> = {};
+    const fieldsSearchLike: Record<string, string> = {};
+    const fieldsFromTo: Record<string, string> = {};
+    const fieldsNull: Record<string, string> = {};
+
+    for (const [key, data] of Object.entries(this.dbTables)) {
       if (!data) continue;
-      fields[`${key}`] = data.data_type;
+      fields[key] = data.data_type;
       if (data.data_type === 'string') fieldsSearchLike[`${key}~`] = data.data_type;
       if (data.is_nullable === 'YES') {
         fieldsNull[`_null_${key}`] = 'string';
@@ -1248,30 +1392,6 @@ export default class CrudBuilder {
       }
     }
 
-    const queryParameters = {
-      ...fields,
-      ...fieldsSearchLike,
-      ...fieldsNull,
-      ...fieldsFromTo,
-      ...this.additionalFields?.get,
-      _fields: {
-        type: 'string',
-        example: 'id,name',
-      },
-      _sort: {
-        type: 'string',
-        example: '-timeCreated,name,random()',
-      },
-      _join: {
-        type: 'string',
-        example: 'table1,alias1',
-      },
-      _limit: 'integer',
-      _page: 'integer',
-      _skip: 'integer',
-      _lang: 'string',
-      ...(this.searchFields.length && { _search: 'string' }),
-    };
     return {
       tokenRequired: this.tokenRequired.get || this.access.read || this.accessByStatuses.read,
       ownerRequired: this.ownerRequired.get,
@@ -1281,144 +1401,23 @@ export default class CrudBuilder {
       joinOnDemand: this.joinOnDemand,
       accessByStatuses: this.accessByStatuses.read,
       additionalFields: this.additionalFields.get,
-      queryParameters,
+      queryParameters: {
+        ...fields,
+        ...fieldsSearchLike,
+        ...fieldsNull,
+        ...fieldsFromTo,
+        ...this.additionalFields?.get,
+        _fields: { type: 'string', example: 'id,name' },
+        _sort: { type: 'string', example: '-timeCreated,name,random()' },
+        _join: { type: 'string', example: 'table1,alias1' },
+        _limit: 'integer',
+        _page: 'integer',
+        _skip: 'integer',
+        _lang: 'string',
+        ...(this.searchFields.length && { _search: 'string' }),
+      },
       apiClientMethodNames: this.apiClientMethodNames,
     };
-  }
-
-  async get(c: Context) {
-    const { result, meta } = await this.getRequestResult(c);
-
-    c.set('meta', meta);
-    c.set('result', result);
-    c.set('relationsData', this.relations);
-  }
-
-  async getRequestResult(c: Context, q?: Record<string, string[]>): Promise<getResultType> {
-    const { db, roles } = c.env;
-    const { user } = c.var;
-
-    this.roles = roles;
-    this.user = user;
-
-    const queries = q || c.req.queries();
-    let queriesWithoutArrays: any = {};
-    for (const [queryName, queryValue] of Object.entries(queries)) {
-      queriesWithoutArrays[`${queryName}`] = queryValue?.length === 1 ? queryValue[0] : queryValue;
-    }
-
-    const {
-      _fields, _sort, _page, _skip, _limit, _unlimited, _after,
-      _lang, _search, _join, ...where
-    } = queriesWithoutArrays;
-
-    if (_lang) this.lang = _lang;
-    this.rows = this.getTableRows(c);
-    this.res = this.getDbWithSchema(c.env.db);
-
-    this.fields({ c, _fields, _join, db, _sort });
-
-    // Object.entries({ ...this.defaultWhere, ...where }).map(([cur, val]) => {
-    //   const isInt = this.dbTables?.[`${cur}`]?.data_type === 'integer';
-    //   const hasNaN = [].concat(val as never).find((item: any) => Number.isNaN(+item));
-    //   if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
-    // });
-
-    this.where({ ...this.defaultWhere, ...where }, db);
-
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr);
-      });
-    }
-
-    if (_search && this.searchFields.length) {
-      const whereStr = this.searchFields.map((name: string) => {
-        const searchName = this.langJoin[`${name}`] || `"${name}"`;
-        return `${searchName} % :_search`;
-        // return `${searchName} % :_search OR "${name}" % :_search`;
-      }).join(' OR ');
-      const lang = this.lang;
-      this.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr, { _search, lang });
-      });
-    }
-
-    this.checkDeleted();
-
-    const total = +(await db.from({ w: this.res }).count('*'))[0].count;
-
-    this.sort(_sort, db);
-
-    const s = _sort || this.defaultSort;
-    const sName = s?.replace(/^-/, '')
-    const limit = getQueryLimit({ _limit, _unlimited });
-
-    if (_after && limit && s && this.getTableRows(c)[`${sName}`]) {
-      this.res.where(sName, s[0] === '-' ? '<' : '>', _after);
-      this.res.limit(limit);
-    }
-
-    else this.pagination({
-      _page, _skip, _limit: limit, _unlimited,
-    });
-
-    // if (_or) console.log(this.res.toSQL())
-
-    const result = await this.res;
-
-    const nextAfterData = result?.at(-1)?.[`${sName}`];
-    const addAfterMs = s?.[0] === '-' ? '000' : '999';
-    const nextAfter = nextAfterData instanceof Date ? new Date(nextAfterData).toISOString().replace('Z', `${addAfterMs}Z`) : nextAfterData;
-
-    // const { sql, bindings } = this.res.toSQL();
-    // const { rows : r } = await db.raw(`EXPLAIN ${sql}`, bindings);
-    // const rrr = r.map(rr => Object.values(rr)).join('\n');
-    // const r4 = rrr.match(/(Seq Scan.*?\n.*)/);
-    // if (
-    //   r4
-    //   && !r4[1].match(/Seq Scan on users[\s\S]*Filter: \(id = \d\)$/)
-    // ) console.log('CHECK SEQ SCAN\n', r4[1]);
-
-    let meta: metaType = { total };
-    if (_after) {
-      meta = {
-        ...meta,
-        after: _after,
-        nextAfter : nextAfter ? encodeURIComponent(nextAfter) : undefined,
-      };
-      meta = {
-        ...meta,
-        isFirstPage: false,
-        isLastPage: !result.length || (limit ? result.length < +limit : false),
-      };
-    } else {
-      const limit2 = +limit;
-      const skip = +_skip || 0;
-      const page = +_page || 1;
-      const pages = !limit2 ? 1 : Math.ceil((total-skip) / limit2);
-      meta = {
-        ...meta,
-        limit: limit2,
-        skip,
-        page,
-        pages,
-        nextAfter : page === 1 && nextAfter ? encodeURIComponent(nextAfter) : undefined,
-        nextPage: page >= pages ? undefined : page + 1,
-        isFirstPage: page <= 1,
-        isLastPage: page >= pages,
-      };
-    }
-
-    const hiddenFields = this.getHiddenFields();
-    if (hiddenFields) {
-      for(let i = 0; i < result.length; i++) {
-        this.deleteHiddenFieldsFromResult(result[i], hiddenFields);
-      }
-    }
-
-    return { result, meta };
   }
 
   optionsGetById() {
@@ -1435,141 +1434,30 @@ export default class CrudBuilder {
     };
   }
 
-  async getById(c: Context) {
-    const { db, roles } = c.env;
-    this.roles = roles;
-    this.user = c.var.user;
-
-    const { id } = c.req.param();
-
-    const {
-      _fields, _lang, _join, ...whereWithParams
-    } = c.req.query();
-    const where = Object.keys(whereWithParams).reduce(
-      (acc: any, key: any) => {
-        if (key[0] !== '_') {
-          const isInt = this.dbTables?.[`${key}`]?.data_type === 'integer';
-          const hasNaN = [].concat(whereWithParams[`${key}`] as never).find((item: any) => Number.isNaN(+item));
-          if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
-          acc[`${key}`] = whereWithParams[`${key}`];
-        }
-        return acc;
-      },
-      {},
-    );
-
-    this.lang = _lang;
-
-    this.rows = this.getTableRows(c);
-    this.res = this.getDbWithSchema(c.env.db);
-
-    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+id)) throw new Error('INTEGER_REQUIRED');
-
-    this.where({ ...where, [`${this.table}.id`]: id }, db);
-
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr);
-      });
-    }
-
-    this.checkDeleted();
-
-    this.fields({
-      c, _fields, _join, db,
-    });
-
-    const result = await this.res.first();
-
-    this.deleteHiddenFieldsFromResult(result, this.getHiddenFields());
-
-    c.set('result', result);
-    c.set('relationsData', this.relations);
-  }
-
-  updateIncomingData(c: Context, data: any) {
-    return Array.isArray(data) ? data.map((item: any) => this.updateData(c, item))
-      : this.updateData(c, data);
-  }
-
-  updateData(c: Context, data: any) {
-    const { user } = c.var;
-    let result = { ...data };
-    const rows = this.getTableRows(c);
-
-    for (const [key, error_code] of Object.entries(this.requiredFields)) {
-      if (!result[`${key}`]) throw new Error(error_code as string);
-    }
-
-    for (const key of this.readOnlyFields) {
-      delete result[`${key}`];
-    }
-
-    result = { ...c.req.param(), ...result };
-
-    for (const r of Object.keys(result)) {
-      if (rows[`${r}`] && typeof result[`${r}`] !== 'undefined') continue;
-      delete result[`${r}`];
-    }
-
-    if (rows.userId && user) result.userId = user.id;
-
-    return result;
-  }
-
   optionsAdd() {
-    const schema = Object.entries(this.dbTables || {}).reduce((acc, [key, data]) => {
-      const keyForbiddeen = this.readOnlyFields.includes(key);
-      return keyForbiddeen ? acc : { ...acc, [key]: data };
-    }, this.additionalFields?.add || {});
-
+    const schema = Object.entries(this.dbTables).reduce<Record<string, unknown>>(
+      (acc, [key, data]) => (this.readOnlyFields.includes(key) ? acc : { ...acc, [key]: data }),
+      this.additionalFields?.add || {},
+    );
     return {
-      tokenRequired: this.tokenRequired.add
-        || this.access.create
-        || this.accessByStatuses.create,
+      tokenRequired: this.tokenRequired.add || this.access.create || this.accessByStatuses.create,
       ownerRequired: this.ownerRequired.add,
       rootRequired: this.rootRequired.add,
       readOnlyFields: this.readOnlyFields,
       requiredFields: Object.keys(this.requiredFields),
-      accessByStatuses: this.accessByStatuses.add,
+      accessByStatuses: this.accessByStatuses.create,
       apiClientMethodNames: this.apiClientMethodNames,
       schema,
     };
   }
 
-  async add(c: Context) {
-    const requestBody = await c.req.json();
-    const bodyKeys = Object.keys(requestBody);
-    const looksLikeArray = bodyKeys.length && bodyKeys.every((j, i) => i === +j);
-    const body = looksLikeArray ? Object.values(requestBody) : requestBody;
-
-    const data: any = this.updateIncomingData(c, body);
-
-    for (const key of Object.keys(data)) {
-      const isInt = this.dbTables?.[`${key}`]?.data_type === 'integer';
-      const hasNaN = [].concat(data[`${key}`]).find((item: any) => item && Number.isNaN(+item));
-      if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
-
-      data[`${key}`] = data[`${key}`] ?? null;
-    }
-
-    const result = await this.getDbWithSchema(c.env.dbWrite).insert(data).returning('*');
-
-    c.set('result', result[0]);
-    c.set('relationsData', this.relations);
-  }
-
   optionsUpdate() {
-    const schema = Object.entries(this.dbTables || {}).reduce((acc, [key, data]) => {
-      const keyForbiddeen = this.readOnlyFields.includes(key);
-      return keyForbiddeen ? acc : { ...acc, [key]: data };
-    }, this.additionalFields?.update || {});
-
+    const schema = Object.entries(this.dbTables).reduce<Record<string, unknown>>(
+      (acc, [key, data]) => (this.readOnlyFields.includes(key) ? acc : { ...acc, [key]: data }),
+      this.additionalFields?.update || {},
+    );
     return {
-      tokenRequired: this.tokenRequired.update
-        || this.access.update
-        || this.accessByStatuses.update,
+      tokenRequired: this.tokenRequired.update || this.access.update || this.accessByStatuses.update,
       ownerRequired: this.ownerRequired.update,
       rootRequired: this.rootRequired.update,
       readOnlyFields: this.readOnlyFields,
@@ -1580,35 +1468,9 @@ export default class CrudBuilder {
     };
   }
 
-  async update(c: Context) {
-    const { db } = c.env;
-    const where: whereParamsType = { ...c.req.param() };
-    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+where.id)) throw new Error('INTEGER_REQUIRED');
-
-    const rows = this.getTableRows(c);
-
-    if (rows.isDeleted) where.isDeleted = false;
-
-    const data = await c.req.json();
-
-    for (const key of this.readOnlyFields) {
-      delete data[`${key}`];
-    }
-
-    if (Object.keys(data).length) {
-      if (rows.timeUpdated) data.timeUpdated = db.fn.now();
-
-      await this.getDbWithSchema(c.env.dbWrite).update(data).where(where);
-    }
-
-    await this.getById(c);
-  }
-
   optionsDelete() {
     return {
-      tokenRequired: this.tokenRequired.delete
-        || this.access.delete
-        || this.accessByStatuses.delete,
+      tokenRequired: this.tokenRequired.delete || this.access.delete || this.accessByStatuses.delete,
       ownerRequired: this.ownerRequired.delete,
       rootRequired: this.rootRequired.delete,
       accessByStatuses: this.accessByStatuses.delete,
@@ -1616,17 +1478,264 @@ export default class CrudBuilder {
     };
   }
 
-  async delete(c: Context) {
-    const { user } = c.var;
+  // -- GET (list) ------------------------------------------
 
-    const where: whereParamsType = { ...c.req.param() };
-    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+where.id)) throw new Error('INTEGER_REQUIRED');
+  async get(c: AppContext): Promise<void> {
+    const { result, meta } = await this.getRequestResult(c);
+    c.set('meta', meta);
+    c.set('result', result);
+    c.set('relationsData', this.relations);
+  }
 
-    const rows = this.getTableRows(c);
+  async getRequestResult(
+    c: AppContext,
+    q?: Record<string, string[]>,
+  ): Promise<getResultType<T>> {
+    this.initState(c);
+    const db = c.env.db;
 
-    if (rows.isDeleted) where.isDeleted = false;
+    const queries = q || c.req.queries();
+    const queriesFlat: Record<string, string | string[]> = {};
+    for (const [name, value] of Object.entries(queries)) {
+      queriesFlat[name] = value?.length === 1 ? value[0] : value;
+    }
 
-    const t = this.getDbWithSchema(c.env.dbWrite).where(where);
+    const {
+      _fields,
+      _sort,
+      _page,
+      _skip,
+      _limit,
+      _unlimited,
+      _after,
+      _lang,
+      _search,
+      _join,
+      ...where
+    } = queriesFlat;
+
+    if (_lang) this.state.lang = _lang as string;
+
+    this.fields({ c, _fields: _fields as string, _join, db, _sort: _sort as string });
+
+    // FIX: defaultWhere is trusted, user WHERE is validated
+    this.where(this.defaultWhere, db, { trusted: true });
+    this.where(where, db);
+
+    if (this.defaultWhereRaw) {
+      const whereStr = this.defaultWhereRaw;
+      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
+        this.whereRaw(whereStr);
+      });
+    }
+
+    if (_search && this.searchFields.length) {
+      const whereStr = this.searchFields
+        .map((name) => {
+          const searchName = this.state.langJoin[name] || `"${name}"`;
+          return `${searchName} % :_search`;
+        })
+        .join(' OR ');
+      const lang = this.state.lang;
+      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
+        this.whereRaw(whereStr, { _search, lang });
+      });
+    }
+
+    this.checkDeleted();
+
+    const total = +(await (db as unknown as {
+      from: (arg: unknown) => { count: (field: string) => Promise<Array<{ count: string }>> };
+    }).from({ w: this.state.res }).count('*'))[0].count;
+    this.sort(_sort as string, db);
+
+    // FIX: cursor pagination - use only first sort field
+    const sortFields = ((_sort as string) || this.defaultSort || '').split(',').filter(Boolean);
+    const firstSortField = sortFields[0];
+    const cursorColumnName = firstSortField?.replace(/^-/, '');
+    const limit = getQueryLimit({
+      _limit: _limit as string,
+      _unlimited: _unlimited as string,
+    });
+
+    if (_after && limit && firstSortField && cursorColumnName && this.state.rows[cursorColumnName]) {
+      const direction = firstSortField.startsWith('-') ? '<' : '>';
+      this.state.res.where(cursorColumnName, direction, _after);
+      this.state.res.limit(limit);
+    } else {
+      this.pagination({
+        _page: _page as string,
+        _skip: _skip as string,
+        _limit: limit,
+        _unlimited: _unlimited as string,
+      });
+    }
+
+    const result = await this.state.res;
+
+    const nextAfterData = cursorColumnName ? result?.at(-1)?.[cursorColumnName] : undefined;
+    const addAfterMs = firstSortField?.startsWith('-') ? '000' : '999';
+    const nextAfter = nextAfterData instanceof Date
+      ? new Date(nextAfterData).toISOString().replace('Z', `${addAfterMs}Z`)
+      : nextAfterData;
+
+    let meta: metaType = { total };
+    if (_after) {
+      meta = {
+        ...meta,
+        after: _after as string,
+        nextAfter: nextAfter ? encodeURIComponent(String(nextAfter)) : undefined,
+        isFirstPage: false,
+        isLastPage: !result.length || (limit ? result.length < limit : false),
+      };
+    } else {
+      const limitNum = limit || 0;
+      const skip = toPositiveInt(_skip, 0);
+      const page = toPositiveInt(_page, 1);
+      const pages = !limitNum ? 1 : Math.max(1, Math.ceil(Math.max(0, total - skip) / limitNum));
+      meta = {
+        ...meta,
+        limit: limitNum,
+        skip,
+        page,
+        pages,
+        nextAfter: page === 1 && nextAfter ? encodeURIComponent(String(nextAfter)) : undefined,
+        nextPage: page >= pages ? undefined : page + 1,
+        isFirstPage: page <= 1,
+        isLastPage: page >= pages,
+      };
+    }
+
+    const hiddenFields = this.getHiddenFields();
+    for (const row of result as Record<string, unknown>[]) {
+      this.deleteHiddenFieldsFromResult(row, hiddenFields);
+    }
+
+    return { result: result as T[], meta };
+  }
+
+  // -- GET by ID -------------------------------------------
+
+  async getById(c: AppContext): Promise<void> {
+    this.initState(c);
+    const db = c.env.db;
+    const { id } = c.req.param();
+
+    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+
+    // FIX: validate user-supplied WHERE keys
+    const where: Record<string, string> = {};
+    for (const [key, val] of Object.entries(whereWithParams)) {
+      if (key.startsWith('_')) continue;
+      const isInt = this.dbTables?.[key]?.data_type === 'integer';
+      const hasNaN = ([] as string[]).concat(val as unknown as string[]).find((item: string) => Number.isNaN(+item));
+      if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
+      if (this.state.rows[key]) {
+        where[key] = val;
+      }
+    }
+
+    if (_lang) this.state.lang = _lang;
+
+    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+id)) {
+      throw new Error('INTEGER_REQUIRED');
+    }
+
+    this.where({ ...where, [`${this.table}.id`]: id }, db, { trusted: true });
+
+    if (this.defaultWhereRaw) {
+      const whereStr = this.defaultWhereRaw;
+      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
+        this.whereRaw(whereStr);
+      });
+    }
+
+    this.checkDeleted();
+    this.fields({ c, _fields, _join, db });
+
+    const result = await this.state.res.first();
+    this.deleteHiddenFieldsFromResult(result as Record<string, unknown> | undefined, this.getHiddenFields());
+
+    c.set('result', result);
+    c.set('relationsData', this.relations);
+  }
+
+  // -- POST -------------------------------------------------
+
+  async add(c: AppContext): Promise<void> {
+    this.initState(c);
+
+    // FIX: use Array.isArray instead of heuristic detection
+    const body = await c.req.json();
+    const data = this.updateIncomingData(c, body as Record<string, unknown> | Record<string, unknown>[]);
+
+    const validatedData = Array.isArray(data)
+      ? data.map((item) => this.validateIntegerFields(item))
+      : this.validateIntegerFields(data);
+
+    const result = await this.getDbWithSchema(c.env.dbWrite)
+      .insert(validatedData)
+      .returning('*');
+
+    c.set('result', result[0]);
+    c.set('relationsData', this.relations);
+  }
+
+  private validateIntegerFields(data: Record<string, unknown>): Record<string, unknown> {
+    for (const key of Object.keys(data)) {
+      const isInt = this.dbTables?.[key]?.data_type === 'integer';
+      const hasNaN = ([] as unknown[])
+        .concat(data[key] as never)
+        .find((item: unknown) => item && Number.isNaN(+(item as string)));
+      if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
+      data[key] = data[key] ?? null;
+    }
+    return data;
+  }
+
+  // -- PUT / PATCH -----------------------------------------
+
+  async update(c: AppContext): Promise<void> {
+    this.initState(c);
+    const db = c.env.db;
+    const params = c.req.param();
+    const whereClause: WhereParams = { ...params };
+
+    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+String(whereClause.id))) {
+      throw new Error('INTEGER_REQUIRED');
+    }
+
+    const rows = this.state.rows;
+    if (rows.isDeleted) whereClause.isDeleted = false;
+
+    const rawData = await c.req.json();
+
+    // FIX: filter update data through table columns (same as add)
+    const data = this.filterDataByTableColumns(rawData as Record<string, unknown>, rows);
+
+    if (Object.keys(data).length) {
+      if (rows.timeUpdated) data.timeUpdated = db.fn.now();
+      await this.getDbWithSchema(c.env.dbWrite).update(data).where(whereClause);
+    }
+
+    await this.getById(c);
+  }
+
+  // -- DELETE ----------------------------------------------
+
+  async delete(c: AppContext): Promise<void> {
+    this.initState(c);
+
+    const whereClause: WhereParams = { ...c.req.param() };
+
+    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+String(whereClause.id))) {
+      throw new Error('INTEGER_REQUIRED');
+    }
+
+    const rows = this.state.rows;
+    if (rows.isDeleted) whereClause.isDeleted = false;
+
+    const t = this.getDbWithSchema(c.env.dbWrite).where(whereClause);
     const result = rows.isDeleted ? await t.update({ isDeleted: true }) : await t.delete();
 
     c.set('result', { ok: true });
@@ -1649,118 +1758,120 @@ export { CrudBuilder };
 import { createFactory } from 'hono/factory';
 import CrudBuilder from './CrudBuilder';
 import type {
-    CrudBuilderOptionsType,
-    MiddlewareHandler,
-    PushToRoutesParamsType,
-    RoutesErrorsType,
-    RoutesEmailTemplatesType,
-    RoutesType,
-    RoutingsOptionsType,
+  AppContext,
+  CrudBuilderOptionsType,
+  MethodsType,
+  MiddlewareHandler,
+  PushToRoutesParamsType,
+  RoutesErrorsType,
+  RoutesEmailTemplatesType,
+  RoutesType,
+  RoutingsOptionsType,
 } from './types';
 
 const factory = createFactory();
 
 export class Routings {
-    routes: RoutesType[] = [];
-    routesPermissions: any = {};
-    routesErrors: RoutesErrorsType = {};
-    routesEmailTemplates: RoutesEmailTemplatesType = {};
-    migrationDirs: string[] | unknown;
+  routes: RoutesType[] = [];
+  routesPermissions: Record<string, string[]> = {};
+  routesErrors: RoutesErrorsType = {};
+  routesEmailTemplates: RoutesEmailTemplatesType = {};
+  migrationDirs: string[] | undefined;
 
-    constructor (options?: RoutingsOptionsType) {
-        const { migrationDirs } = options || {};
-        if (migrationDirs) this.migrationDirs = migrationDirs;
+  constructor(options?: RoutingsOptionsType) {
+    if (options?.migrationDirs) this.migrationDirs = options.migrationDirs;
+  }
+
+  private pushToRoutes({ method, path, fnArr }: PushToRoutesParamsType): void {
+    for (const fn of fnArr) {
+      const handlers = factory.createHandlers(fn);
+      this.routes.push({ path, method, handlers });
     }
+  }
 
-    private pushToRoutes({ method, path, fnArr }: PushToRoutesParamsType) {
-        for (const fn of fnArr) {
-            const handlers = factory.createHandlers(fn);
-            this.routes.push({ path, method, handlers });
-        }
+  get(path: string, ...fnArr: MiddlewareHandler[]): void {
+    this.pushToRoutes({ method: 'GET', path, fnArr });
+  }
+
+  post(path: string, ...fnArr: MiddlewareHandler[]): void {
+    this.pushToRoutes({ method: 'POST', path, fnArr });
+  }
+
+  patch(path: string, ...fnArr: MiddlewareHandler[]): void {
+    this.pushToRoutes({ method: 'PATCH', path, fnArr });
+  }
+
+  put(path: string, ...fnArr: MiddlewareHandler[]): void {
+    this.pushToRoutes({ method: 'PUT', path, fnArr });
+  }
+
+  delete(path: string, ...fnArr: MiddlewareHandler[]): void {
+    this.pushToRoutes({ method: 'DELETE', path, fnArr });
+  }
+
+  use(path: string, ...fnArr: MiddlewareHandler[]): void {
+    this.pushToRoutes({ path, fnArr });
+  }
+
+  all(...fnArr: MiddlewareHandler[]): void {
+    this.pushToRoutes({ path: '*', fnArr });
+  }
+
+  crud(params: CrudBuilderOptionsType): void {
+    const { prefix, table, permissions } = params;
+    const p = `/${prefix || table}`.replace(/^\/+/, '/');
+
+    this.get(`${p}`, async (c) => {
+      const cb = new CrudBuilder(params);
+      await cb.get(c as AppContext);
+    });
+    this.post(`${p}`, async (c) => {
+      const cb = new CrudBuilder(params);
+      await cb.add(c as AppContext);
+    });
+    this.get(`${p}/:id`, async (c) => {
+      const cb = new CrudBuilder(params);
+      await cb.getById(c as AppContext);
+    });
+    this.put(`${p}/:id`, async (c) => {
+      const cb = new CrudBuilder(params);
+      await cb.update(c as AppContext);
+    });
+    this.patch(`${p}/:id`, async (c) => {
+      const cb = new CrudBuilder(params);
+      await cb.update(c as AppContext);
+    });
+    this.delete(`${p}/:id`, async (c) => {
+      const cb = new CrudBuilder(params);
+      await cb.delete(c as AppContext);
+    });
+
+    if (permissions?.protectedMethods) {
+      const register = (path: string, method: string): void => {
+        const key = `${method} ${path}`;
+        if (!this.routesPermissions[key]) this.routesPermissions[key] = [];
+        this.routesPermissions[key].push(`${p.replace(/^\//, '')}.${method.toLowerCase()}`);
+      };
+
+      const methods: MethodsType[] = permissions.protectedMethods[0] === '*'
+        ? ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
+        : (permissions.protectedMethods as MethodsType[]);
+
+      for (const method of methods) {
+        if (method === 'POST' || method === 'GET') register(p, method);
+        if (method !== 'POST') register(`${p}/:id`, method);
+      }
     }
+  }
 
-    get(path: string, ...fnArr: MiddlewareHandler[]) {
-        this.pushToRoutes({ method: 'GET', path, fnArr });
-    }
+  errors(err: RoutesErrorsType | RoutesErrorsType[]): void {
+    const errArr = Array.isArray(err) ? err : [err];
+    for (const e of errArr) this.routesErrors = { ...this.routesErrors, ...e };
+  }
 
-    post(path: string, ...fnArr: MiddlewareHandler[]) {
-        this.pushToRoutes({ method: 'POST', path, fnArr });
-    }
-
-    patch(path: string, ...fnArr: MiddlewareHandler[]) {
-        this.pushToRoutes({ method: 'PATCH', path, fnArr });
-    }
-
-    put(path: string, ...fnArr: MiddlewareHandler[]) {
-        this.pushToRoutes({ method: 'PUT', path, fnArr });
-    }
-
-    delete(path: string, ...fnArr: MiddlewareHandler[]) {
-        this.pushToRoutes({ method: 'DELETE', path, fnArr });
-    }
-
-    use(path: string, ...fnArr: MiddlewareHandler[]) {
-        this.pushToRoutes({ path, fnArr });
-    }
-
-    all(...fnArr: MiddlewareHandler[]) {
-        this.pushToRoutes({ path: '*', fnArr });
-    }
-
-    crud(params: CrudBuilderOptionsType) {
-        const { table, prefix, permissions } = params;
-        // const { table, prefix, tag, relations, responseSchema, forbiddenActions = [] } = params;
-
-        const p = `/${prefix || table}`.replace(/^\/+/, '/');
-
-        this.get(`${p}`, async (c) => {
-            const crudBuilder = new CrudBuilder(params);
-            await crudBuilder.get(c);
-        });
-        this.post(`${p}`, async (c) => {
-            const crudBuilder = new CrudBuilder(params);
-            await crudBuilder.add(c);
-        });
-        this.get(`${p}/:id`, async (c) => {
-            const crudBuilder = new CrudBuilder(params);
-            await crudBuilder.getById(c);
-        });
-        this.put(`${p}/:id`, async (c) => {
-            const crudBuilder = new CrudBuilder(params);
-            await crudBuilder.update(c);
-        });
-        this.patch(`${p}/:id`, async (c) => {
-            const crudBuilder = new CrudBuilder(params);
-            await crudBuilder.update(c);
-        });
-        this.delete(`${p}/:id`, async (c) => {
-            const crudBuilder = new CrudBuilder(params);
-            await crudBuilder.delete(c);
-        });
-
-        if (permissions?.protectedMethods) {
-            const updteRoutesPermissions = (path: string, method: string) => {
-                const key = `${method} ${path}`;
-                if (!this.routesPermissions[`${key}`]) this.routesPermissions[`${key}`] = [];
-                this.routesPermissions[`${key}`].push(`${p.replace(/^\//, '')}.${method.toLowerCase()}`);
-            };
-
-            const methods = permissions?.protectedMethods?.[0] === '*' ? ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] : permissions?.protectedMethods;
-            for (const method of methods) {
-                if (method === 'POST' || method === 'GET') updteRoutesPermissions(`${p}`, method);
-                if (method !== 'POST') updteRoutesPermissions(`${p}/:id`, method);
-            }
-        }
-    }
-
-    errors(err: RoutesErrorsType | RoutesErrorsType[]) {
-        const errArr = Array.isArray(err) ? err : [err];
-        errArr.map((e) => this.routesErrors = {...this.routesErrors, ...e});
-    }
-
-    emailTemplates(template: RoutesEmailTemplatesType) {
-        this.routesEmailTemplates = { ...this.routesEmailTemplates, ...template };
-    }
+  emailTemplates(template: RoutesEmailTemplatesType): void {
+    this.routesEmailTemplates = { ...this.routesEmailTemplates, ...template };
+  }
 }
 ```
 
@@ -1768,147 +1879,1185 @@ export class Routings {
 ```ts
 import type { Context, MiddlewareHandler, Handler } from 'hono';
 import type { H } from 'hono/types';
+import type { Knex } from 'knex';
 
 export type { MiddlewareHandler, Handler };
 
-export type MethodsType = ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'][number];
+export type MethodsType = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE' | 'OPTIONS';
 
 export type MethodPathType = {
-    method?: MethodsType;
-    path: string;
+  method?: MethodsType;
+  path: string;
 };
 
 export type RoutesType = MethodPathType & {
-    handlers: (Handler | MiddlewareHandler)[];
+  handlers: (Handler | MiddlewareHandler)[];
 };
 
 export type PushToRoutesParamsType = MethodPathType & {
-    fnArr: H<any, any, {}, any>[];
+  fnArr: H[];
 };
 
-export type RoutesErrorsType = {
-    [key: string]: {
-        code: number,
-        status: number,
-        description?: string,
-    }    
+// -- FIX: proper env typing --------------------------------
+
+export type ColumnInfo = {
+  data_type: 'string' | 'integer' | 'boolean' | 'file' | 'date'
+    | 'timestamp' | 'json' | 'jsonb' | 'text' | 'uuid' | (string & {});
+  is_nullable: 'YES' | 'NO';
+  column_default?: string | null;
+  character_maximum_length?: number | null;
 };
 
-export type EmailTemplatesType = {
-    subject?: string;
-    text?: string;
-    html?: string;
+export type ColumnInfoMap = Record<string, ColumnInfo>;
+
+export type UserType = {
+  id: string | number;
+  roles?: string[];
+  [key: string]: unknown;
 };
 
-export type RoutesEmailTemplatesType = Record<string, EmailTemplatesType>;
+export interface RolesService {
+  getPermissions(roles?: string[]): Record<string, boolean>;
+  checkWildcardPermissions(params: {
+    key: string;
+    permissions: Record<string, boolean>;
+  }): boolean;
+}
 
-export type DbOptionsType = {
-    migrationDirs?: string[];
+export type EnvBindings = {
+  db: Knex;
+  dbWrite: Knex;
+  dbTables: Record<string, ColumnInfoMap>;
+  roles?: RolesService;
+  error?: (code: string, status?: number) => void;
+  getErrorByMessage?: (message: string) => unknown;
+  log?: (...args: unknown[]) => void;
 };
+
+export type VarBindings = {
+  user?: UserType;
+  result?: unknown;
+  meta?: metaType | Record<string, unknown>;
+  relationsData?: Record<string, CrudBuilderOptionsType>;
+};
+
+export type AppContext = Context<{
+  Bindings: EnvBindings & Record<string, unknown>;
+  Variables: VarBindings & Record<string, unknown>;
+}>;
+
+// -- Route-level types -------------------------------------
+
+export type RouteErrorType = {
+  code: number;
+  status: number;
+  description?: string;
+};
+
+export type RoutesErrorsType = Record<string, RouteErrorType>;
+
+export type EmailTemplateType = {
+  subject?: string;
+  text?: string;
+  html?: string;
+};
+
+export type RoutesEmailTemplatesType = Record<string, EmailTemplateType>;
 
 export type RoutingsOptionsType = {
-    migrationDirs?: string[];
+  migrationDirs?: string[];
 };
 
-export type DbTablesType = {
-    data_type: string;
-    is_nullable: string;
-    [key: string]: any;
-};
+// -- FIX: eliminate `any`, add proper field types ----------
 
-export type stringRecordType = Record<string, string>;
+export type StringRecord = Record<string, string>;
+export type FieldValue = string | number | boolean | null;
+export type FieldRecord = Record<string, FieldValue>;
+export type WhereParams = Record<string, string | string[] | boolean | null>;
 
-export type fieldRecordType = Record<string, fieldType>;
+// -- backward compat aliases -------------------------------
+export type stringRecordType = StringRecord;
+export type fieldRecordType = FieldRecord;
+export type whereParamsType = WhereParams;
+export type DbTablesType = ColumnInfoMap;
 
-export type whereParamsType = stringRecordType & { isDeleted?: boolean };
-
-export type fieldType = string | number | boolean;
+// -- Join configuration ------------------------------------
 
 export type CrudBuilderJoinType = {
-    table: string;
-    schema?: string;
-    alias?: string;
-    as?: string;
-    where?: string;
-    whereBindings?: stringRecordType;
-    defaultValue?: fieldType;
-    fields?: string[];
-    field?: string;
-    orderBy?: string;
-    limit?: number;
-    leftJoin?: string | string[];
-    byIndex?: number;
-    permission?: string;
+  table: string;
+  schema?: string;
+  alias?: string;
+  as?: string;
+  where?: string;
+  whereBindings?: StringRecord;
+  defaultValue?: FieldValue;
+  fields?: (string | Record<string, string>)[];
+  field?: string;
+  orderBy?: string;
+  limit?: number;
+  leftJoin?: string | [string, string, string];
+  byIndex?: number;
+  permission?: string;
 };
+
+// -- Permissions -------------------------------------------
 
 export type CrudBuilderPermissionsType = {
-    protectedMethods?: (MethodsType | '*')[];
-    owner?:  string[];
-    fields?: {
-        viewable?: Record<string, string[]>;
-        editable?: Record<string, string[]>;
-    };
+  protectedMethods?: (MethodsType | '*')[];
+  owner?: string[];
+  fields?: {
+    viewable?: Record<string, string[]>;
+    editable?: Record<string, string[]>;
+  };
 };
 
-export type CrudBuilderOptionsType = {
-    c?: Context;
-    table: string;
-    prefix?: string;
-    schema?: string;
-    aliases?: stringRecordType;
-    join?: CrudBuilderJoinType[];
-    joinOnDemand?: CrudBuilderJoinType[];
-    leftJoin?: string[];
-    leftJoinDistinct?: string[];
-    lang?: string;
-    translate?: string[];
-    searchFields?: string[];
-    requiredFields?: string[];
-    hiddenFields?: string[];
-    readOnlyFields?: string[];
-    showFieldsByPermission?: Record<string, string[]>;
-    permissions?: CrudBuilderPermissionsType;
+// -- CRUD action names and access records ------------------
 
-    defaultWhere?: fieldRecordType;
-    defaultWhereRaw?: string;
-    defaultSort?: string;
-    sortRaw?: string;
-    fieldsRaw?: any;
-    includeDeleted?: boolean;
-    deletedReplacements?: fieldRecordType;
-    relations?: Record<string, CrudBuilderOptionsType>;
-    relationIdName?: string;
+export type CrudAction = 'get' | 'add' | 'update' | 'delete';
+export type AccessRecord = Partial<Record<'read' | 'create' | 'update' | 'delete', boolean | string>>;
+export type ActionFlags = Partial<Record<CrudAction, boolean>>;
 
-    tokenRequired?: any;
-    ownerRequired?: any;
-    rootRequired?: any;
-    access?: any;
-    accessByStatuses?: any;
-    dbTables?: any;
-    cache?: any;
-    userIdFieldName?: any;
-    additionalFields?: any;
-    apiClientMethodNames?: any;
+// -- FIX: generic result types -----------------------------
+
+export type CrudBuilderOptionsType<T extends Record<string, unknown> = Record<string, unknown>> = {
+  c?: AppContext;
+  table: string;
+  prefix?: string;
+  schema?: string;
+  aliases?: StringRecord;
+  join?: CrudBuilderJoinType[];
+  joinOnDemand?: CrudBuilderJoinType[];
+  leftJoin?: [string, string, string][];
+  leftJoinDistinct?: boolean;
+  lang?: string;
+  translate?: string[];
+  searchFields?: string[];
+  requiredFields?: Record<string, string>;
+  hiddenFields?: string[];
+  readOnlyFields?: string[];
+  permissions?: CrudBuilderPermissionsType;
+
+  defaultWhere?: FieldRecord;
+  defaultWhereRaw?: string;
+  defaultSort?: string;
+  sortRaw?: string;
+  fieldsRaw?: string[];
+  includeDeleted?: boolean;
+  deletedReplacements?: FieldRecord;
+  relations?: Record<string, CrudBuilderOptionsType>;
+  relationIdName?: string;
+
+  tokenRequired?: CrudAction[];
+  ownerRequired?: CrudAction[];
+  rootRequired?: CrudAction[];
+  access?: AccessRecord;
+  accessByStatuses?: AccessRecord;
+  dbTables?: ColumnInfoMap;
+  cache?: { ttl?: number };
+  userIdFieldName?: string;
+  additionalFields?: Partial<Record<CrudAction | 'get', Record<string, unknown>>>;
+  apiClientMethodNames?: StringRecord;
 };
+
+// -- Meta / Result -----------------------------------------
 
 export type metaType = {
-    total: number;
-    limit?: number;
-    skip?: number;
-    page?: number;
-    nextPage?: number;
-    pages?: number;
-    after?: string;
-    nextAfter?: string;
-    isFirstPage?: boolean;
-    isLastPage?: boolean;
+  total: number;
+  limit?: number;
+  skip?: number;
+  page?: number;
+  nextPage?: number;
+  pages?: number;
+  after?: string;
+  nextAfter?: string;
+  isFirstPage?: boolean;
+  isLastPage?: boolean;
 };
 
-export type getResultType = {
-    result: any[];
-    meta: metaType;
-    relations?: Record<string, any[]>;
-    error?: boolean;
+export type getResultType<T = Record<string, unknown>> = {
+  result: T[];
+  meta: metaType;
+  relations?: Record<string, unknown[]>;
+  error?: boolean;
+};
+
+// -- FIX: per-request mutable state type -------------------
+
+export type RequestState = {
+  res: Knex.QueryBuilder;
+  rows: ColumnInfoMap;
+  user: UserType | undefined;
+  roles: RolesService | undefined;
+  lang: string;
+  coalesceWhere: Record<string, string>;
+  coalesceWhereReplacements: Record<string, unknown>;
+  langJoin: Record<string, string>;
+};
+
+export type HiddenFieldsResult = {
+  regular: string[];
+  owner: string[];
+};
+```
+
+### test/CrudBuilder.test.ts
+```ts
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import CrudBuilder from '../src/CrudBuilder';
+import {
+  createMockContext,
+  usersColumns,
+  type MockContextResult,
+} from './helpers';
+import type { CrudBuilderOptionsType } from '../src/types';
+
+// -- Defaults ----------------------------------------------
+
+const TABLE = 'users';
+const SCHEMA = 'public';
+
+const defaultOptions: CrudBuilderOptionsType = {
+  table: TABLE,
+  schema: SCHEMA,
+  hiddenFields: ['password'],
+};
+
+const defaultDbTables = { [`${SCHEMA}.${TABLE}`]: usersColumns };
+
+function buildContext(overrides: Parameters<typeof createMockContext>[0] = {}): MockContextResult {
+  return createMockContext({
+    dbTables: defaultDbTables,
+    ...overrides,
+  });
 }
+
+// -- 1. SQL Injection: _sort validation --------------------
+
+describe('Security: _sort validation', () => {
+  it('allows known column names', async () => {
+    const { c, db } = buildContext({
+      queries: { _sort: ['name'], _limit: ['10'] },
+      queryResult: [{ id: 1, name: 'Alice' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const orderCalls = db.queryBuilder.getAllCalls('orderBy');
+    expect(orderCalls.length).toBe(1);
+    expect(orderCalls[0].args[0]).toBe('name');
+  });
+
+  it('allows descending sort with -', async () => {
+    const { c, db } = buildContext({
+      queries: { _sort: ['-timeCreated'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const orderCalls = db.queryBuilder.getAllCalls('orderBy');
+    expect(orderCalls.length).toBe(1);
+    expect(orderCalls[0].args[0]).toBe('timeCreated');
+    expect(orderCalls[0].args[1]).toBe('desc');
+  });
+
+  it('allows random()', async () => {
+    const { c, db } = buildContext({
+      queries: { _sort: ['random()'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const orderCalls = db.queryBuilder.getAllCalls('orderBy');
+    expect(orderCalls.length).toBe(1);
+  });
+
+  it('silently ignores unknown sort fields', async () => {
+    const { c, db } = buildContext({
+      queries: {
+        _sort: ['nonexistent_column'],
+        _limit: ['10'],
+      },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const orderCalls = db.queryBuilder.getAllCalls('orderBy');
+    expect(orderCalls.length).toBe(0);
+  });
+
+  it('rejects SQL injection via _sort', async () => {
+    const { c, db } = buildContext({
+      queries: {
+        _sort: ['name; DROP TABLE users--'],
+        _limit: ['10'],
+      },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const orderCalls = db.queryBuilder.getAllCalls('orderBy');
+    expect(orderCalls.length).toBe(0);
+  });
+
+  it('filters mixed valid/invalid sort fields', async () => {
+    const { c, db } = buildContext({
+      queries: {
+        _sort: ['-name,INJECTED,email'],
+        _limit: ['10'],
+      },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const orderCalls = db.queryBuilder.getAllCalls('orderBy');
+    expect(orderCalls.length).toBe(2);
+    expect(orderCalls[0].args[0]).toBe('name');
+    expect(orderCalls[1].args[0]).toBe('email');
+  });
+});
+
+// -- 2. Unfiltered WHERE keys ------------------------------
+
+describe('Security: WHERE key validation', () => {
+  it('allows known columns in query', async () => {
+    const { c, db } = buildContext({
+      queries: { status: ['active'], _limit: ['10'] },
+      queryResult: [{ id: 1, status: 'active' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    expect(db.queryBuilder.hasCalled('where')).toBe(true);
+  });
+
+  it('silently ignores unknown columns', async () => {
+    const { c, db } = buildContext({
+      queries: { secret_column: ['hack'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const whereCalls = db.queryBuilder.getAllCalls('where');
+    // only `isDeleted=false` from checkDeleted, no `secret_column`
+    const hasSecretCol = whereCalls.some((call) => {
+      const arg = call.args[0];
+      return typeof arg === 'string' && arg.includes('secret');
+    });
+    expect(hasSecretCol).toBe(false);
+  });
+
+  it('allows _from_ / _to_ for known columns', async () => {
+    const { c, db } = buildContext({
+      queries: { _from_age: ['18'], _to_age: ['65'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const whereCalls = db.queryBuilder.getAllCalls('where');
+    const ageFilters = whereCalls.filter((call) =>
+      call.args[0] === 'age',
+    );
+    expect(ageFilters.length).toBe(2);
+  });
+
+  it('ignores _from_ / _to_ for unknown columns', async () => {
+    const { c, db } = buildContext({
+      queries: { _from_salary: ['100000'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const whereCalls = db.queryBuilder.getAllCalls('where');
+    const salaryFilters = whereCalls.filter((call) =>
+      String(call.args[0]).includes('salary'),
+    );
+    expect(salaryFilters.length).toBe(0);
+  });
+});
+
+// -- 3. Mass assignment in update --------------------------
+
+describe('Security: mass assignment in update()', () => {
+  it('filters unknown columns from update body', async () => {
+    const { c, dbWrite } = buildContext({
+      params: { id: '1' },
+      body: {
+        name: 'Updated',
+        isAdmin: true,
+        internalScore: 999,
+      },
+      queryResult: [{ id: 1, name: 'Updated' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder({ ...defaultOptions, dbTables: usersColumns });
+    await crud.update(c);
+
+    const updateCalls = dbWrite.queryBuilder.getAllCalls('update');
+    expect(updateCalls.length).toBe(1);
+    const data = updateCalls[0].args[0] as Record<string, unknown>;
+    expect(data.name).toBe('Updated');
+    expect(data).not.toHaveProperty('isAdmin');
+    expect(data).not.toHaveProperty('internalScore');
+  });
+
+  it('removes readOnly fields from update body', async () => {
+    const { c, dbWrite } = buildContext({
+      params: { id: '1' },
+      body: {
+        name: 'Updated',
+        id: 999,
+        timeCreated: 'hacked',
+      },
+      queryResult: [{ id: 1, name: 'Updated' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder({ ...defaultOptions, dbTables: usersColumns });
+    await crud.update(c);
+
+    const updateCalls = dbWrite.queryBuilder.getAllCalls('update');
+    const data = updateCalls[0].args[0] as Record<string, unknown>;
+    expect(data).not.toHaveProperty('id');
+    expect(data).not.toHaveProperty('timeCreated');
+  });
+});
+
+// -- 4. URL params no longer merge into body ---------------
+
+describe('Security: URL params not in body', () => {
+  it('does not merge URL :id into insert data', async () => {
+    const { c, dbWrite } = buildContext({
+      params: { id: '999' },
+      body: { name: 'New User', email: 'a@b.com' },
+    });
+
+    const crud = new CrudBuilder({ ...defaultOptions, dbTables: usersColumns });
+    await crud.add(c);
+
+    const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
+    const data = insertCalls[0].args[0] as Record<string, unknown>;
+    expect(data).not.toHaveProperty('id');
+    expect(data.name).toBe('New User');
+  });
+});
+
+// -- 5. Cursor pagination with multi-sort ------------------
+
+describe('Bug fix: cursor pagination with multi-sort', () => {
+  it('uses only first sort field for cursor', async () => {
+    const { c, db } = buildContext({
+      queries: {
+        _sort: ['-timeCreated,name'],
+        _after: ['2024-01-15T12:00:00Z'],
+        _limit: ['20'],
+      },
+      queryResult: [],
+      countResult: 100,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const whereCalls = db.queryBuilder.getAllCalls('where');
+    const cursorWhere = whereCalls.find((call) =>
+      call.args[0] === 'timeCreated',
+    );
+
+    expect(cursorWhere).toBeDefined();
+    expect(cursorWhere!.args[1]).toBe('<');
+    expect(cursorWhere!.args[2]).toBe('2024-01-15T12:00:00Z');
+  });
+});
+
+// -- 6. Array detection fix --------------------------------
+
+describe('Bug fix: array detection in add()', () => {
+  it('handles real array body correctly', async () => {
+    const { c, dbWrite } = buildContext({
+      body: [
+        { name: 'Alice', email: 'a@b.com' },
+        { name: 'Bob', email: 'b@b.com' },
+      ],
+    });
+
+    const crud = new CrudBuilder({ ...defaultOptions, dbTables: usersColumns });
+    await crud.add(c);
+
+    const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
+    const data = insertCalls[0].args[0] as unknown[];
+    expect(Array.isArray(data)).toBe(true);
+    expect(data.length).toBe(2);
+  });
+
+  it('does NOT treat numeric-keyed objects as arrays', async () => {
+    const { c, dbWrite } = buildContext({
+      body: { name: 'Single User', email: 'a@b.com' },
+    });
+
+    const crud = new CrudBuilder({ ...defaultOptions, dbTables: usersColumns });
+    await crud.add(c);
+
+    const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
+    const data = insertCalls[0].args[0] as Record<string, unknown>;
+    expect(Array.isArray(data)).toBe(false);
+    expect(data.name).toBe('Single User');
+  });
+});
+
+// -- 7. Negative page validation ---------------------------
+
+describe('Bug fix: pagination validation', () => {
+  it('clamps negative _page to 1', async () => {
+    const { c, db } = buildContext({
+      queries: { _page: ['-5'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 100,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    const { meta } = await crud.getRequestResult(c);
+
+    expect(meta.page).toBe(1);
+    const offsetCalls = db.queryBuilder.getAllCalls('offset');
+    expect(offsetCalls.length).toBe(1);
+    expect(Number(offsetCalls[0].args[0])).toBeGreaterThanOrEqual(0);
+  });
+
+  it('clamps _page=0 to 1', async () => {
+    const { c } = buildContext({
+      queries: { _page: ['0'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 100,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    const { meta } = await crud.getRequestResult(c);
+
+    expect(meta.page).toBe(1);
+  });
+
+  it('clamps negative _skip to 0', async () => {
+    const { c, db } = buildContext({
+      queries: { _skip: ['-100'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 100,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    const { meta } = await crud.getRequestResult(c);
+
+    expect(meta.skip).toBe(0);
+  });
+
+  it('pages never negative when skip > total', async () => {
+    const { c } = buildContext({
+      queries: { _skip: ['200'], _limit: ['10'] },
+      queryResult: [],
+      countResult: 50,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    const { meta } = await crud.getRequestResult(c);
+
+    expect(meta.pages).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// -- 8. Hidden fields --------------------------------------
+
+describe('Hidden fields', () => {
+  it('removes hidden fields from list results', async () => {
+    const { c } = buildContext({
+      queries: { _limit: ['10'] },
+      queryResult: [
+        { id: 1, name: 'Alice', password: 'secret123' },
+        { id: 2, name: 'Bob', password: 'secret456' },
+      ],
+      countResult: 2,
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      hiddenFields: ['password'],
+    });
+
+    const { result } = await crud.getRequestResult(c);
+    for (const row of result) {
+      expect(row).not.toHaveProperty('password');
+    }
+  });
+
+  it('shows owner-visible fields to owner', async () => {
+    const mockRoles: any = {
+      getPermissions: () => ({}),
+      checkWildcardPermissions: ({ key }: { key: string }) =>
+        key === 'users.view_email',
+    };
+
+    const { c } = buildContext({
+      queries: { _limit: ['10'] },
+      queryResult: [{ id: 1, name: 'Alice', email: 'a@b.com', userId: 42 }],
+      countResult: 1,
+      user: { id: 42 },
+      roles: mockRoles,
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      hiddenFields: ['email'],
+      userIdFieldName: 'userId',
+      permissions: {
+        owner: ['users.view_email'],
+        fields: {
+          viewable: { 'users.view_email': ['email'] },
+        },
+      },
+    });
+
+    const { result } = await crud.getRequestResult(c);
+    // owner with matching permission -> email visible
+    expect(result[0]).toHaveProperty('email');
+  });
+});
+
+// -- 9. Soft delete ----------------------------------------
+
+describe('Soft delete', () => {
+  it('adds isDeleted=false when table has isDeleted column', async () => {
+    const { c, db } = buildContext({
+      queries: { _limit: ['10'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const whereCalls = db.queryBuilder.getAllCalls('where');
+    const deletedFilter = whereCalls.find((call) => {
+      const arg = call.args[0] as Record<string, unknown>;
+      return typeof arg === 'object' && arg !== null && `${TABLE}.isDeleted` in arg;
+    });
+    expect(deletedFilter).toBeDefined();
+  });
+
+  it('skips isDeleted filter when includeDeleted=true', async () => {
+    const { c, db } = buildContext({
+      queries: { _limit: ['10'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder({ ...defaultOptions, includeDeleted: true });
+    await crud.get(c);
+
+    const whereCalls = db.queryBuilder.getAllCalls('where');
+    const deletedFilter = whereCalls.find((call) => {
+      const arg = call.args[0] as Record<string, unknown>;
+      return typeof arg === 'object' && arg !== null && `${TABLE}.isDeleted` in arg;
+    });
+    expect(deletedFilter).toBeUndefined();
+  });
+});
+
+// -- 10. getQueryLimit with env vars -----------------------
+
+describe('getQueryLimit (env vars)', () => {
+  const origEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...origEnv };
+  });
+
+  it('returns undefined when unlimited is allowed and requested', async () => {
+    process.env.CAN_GET_UNLIMITED = 'true';
+    const { c } = buildContext({
+      queries: { _unlimited: ['true'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    const { meta } = await crud.getRequestResult(c);
+
+    expect(meta.limit).toBe(0);
+  });
+
+  it('uses LIMIT_DEFAULT when no _limit in request', async () => {
+    process.env.LIMIT_DEFAULT = '25';
+    const { c, db } = buildContext({
+      queries: {},
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const limitCalls = db.queryBuilder.getAllCalls('limit');
+    expect(limitCalls.length).toBe(1);
+    expect(limitCalls[0].args[0]).toBe(25);
+  });
+
+  it('caps _limit to LIMIT_MAX', async () => {
+    process.env.LIMIT_MAX = '50';
+    const { c, db } = buildContext({
+      queries: { _limit: ['1000'] },
+      queryResult: [],
+      countResult: 0,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.get(c);
+
+    const limitCalls = db.queryBuilder.getAllCalls('limit');
+    expect(limitCalls[0].args[0]).toBe(50);
+  });
+});
+
+// -- 11. Options methods -----------------------------------
+
+describe('optionsGet()', () => {
+  it('returns documented query parameters', () => {
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      dbTables: usersColumns,
+      searchFields: ['name'],
+    });
+
+    const opts = crud.optionsGet();
+    expect(opts.queryParameters).toHaveProperty('_fields');
+    expect(opts.queryParameters).toHaveProperty('_sort');
+    expect(opts.queryParameters).toHaveProperty('_limit');
+    expect(opts.queryParameters).toHaveProperty('_search');
+    expect(opts.queryParameters).toHaveProperty('name');
+  });
+});
+```
+
+### test/helpers.ts
+```ts
+import type { Knex } from 'knex';
+import type { AppContext, ColumnInfoMap, EnvBindings, UserType, RolesService } from '../src/types';
+
+// -- Chainable Knex QueryBuilder mock ----------------------
+
+type MockCall = { method: string; args: unknown[] };
+
+export class MockQueryBuilder {
+  calls: MockCall[] = [];
+  private _result: unknown;
+
+  constructor(result: unknown = []) {
+    this._result = result;
+  }
+
+  setResult(result: unknown): void {
+    this._result = result;
+  }
+
+  then(resolve: (v: unknown) => void): void {
+    resolve(this._result);
+  }
+
+  // -- chainable stubs --
+
+  private chain(method: string, ...args: unknown[]): this {
+    this.calls.push({ method, args });
+    return this;
+  }
+
+  withSchema(...a: unknown[]) { return this.chain('withSchema', ...a); }
+  where(...a: unknown[]) { return this.chain('where', ...a); }
+  whereNot(...a: unknown[]) { return this.chain('whereNot', ...a); }
+  whereIn(...a: unknown[]) { return this.chain('whereIn', ...a); }
+  whereNotIn(...a: unknown[]) { return this.chain('whereNotIn', ...a); }
+  whereNull(...a: unknown[]) { return this.chain('whereNull', ...a); }
+  whereNotNull(...a: unknown[]) { return this.chain('whereNotNull', ...a); }
+  whereRaw(...a: unknown[]) { return this.chain('whereRaw', ...a); }
+  andWhere(...a: unknown[]) { return this.chain('andWhere', ...a); }
+  orWhere(...a: unknown[]) { return this.chain('orWhere', ...a); }
+  orderBy(...a: unknown[]) { return this.chain('orderBy', ...a); }
+  orderByRaw(...a: unknown[]) { return this.chain('orderByRaw', ...a); }
+  limit(...a: unknown[]) { return this.chain('limit', ...a); }
+  offset(...a: unknown[]) { return this.chain('offset', ...a); }
+  column(...a: unknown[]) { return this.chain('column', ...a); }
+  select(...a: unknown[]) { return this.chain('select', ...a); }
+  leftJoin(...a: unknown[]) { return this.chain('leftJoin', ...a); }
+  distinct(...a: unknown[]) { return this.chain('distinct', ...a); }
+  insert(...a: unknown[]) { return this.chain('insert', ...a); }
+  update(...a: unknown[]) { return this.chain('update', ...a); }
+  delete(...a: unknown[]) { return this.chain('delete', ...a); }
+  returning(...a: unknown[]) { return this.chain('returning', ...a); }
+
+  count(...a: unknown[]) {
+    this.calls.push({ method: 'count', args: a });
+    return this;
+  }
+
+  first() {
+    this.calls.push({ method: 'first', args: [] });
+    const r = Array.isArray(this._result) ? this._result[0] : this._result;
+    return { then: (resolve: (v: unknown) => void) => resolve(r) };
+  }
+
+  hasCalled(method: string): boolean {
+    return this.calls.some((c) => c.method === method);
+  }
+
+  getCallArgs(method: string): unknown[] | undefined {
+    return this.calls.find((c) => c.method === method)?.args;
+  }
+
+  getAllCalls(method: string): MockCall[] {
+    return this.calls.filter((c) => c.method === method);
+  }
+}
+
+// -- Mock Knex instance ------------------------------------
+
+export type MockKnexResult = {
+  knex: Knex;
+  queryBuilder: MockQueryBuilder;
+  countBuilder: MockQueryBuilder;
+};
+
+export function createMockKnex(options: {
+  queryResult?: unknown[];
+  countResult?: number;
+} = {}): MockKnexResult {
+  const { queryResult = [], countResult = 0 } = options;
+
+  const queryBuilder = new MockQueryBuilder(queryResult);
+  const countBuilder = new MockQueryBuilder([{ count: String(countResult) }]);
+
+  const knex = Object.assign(
+    (_table: string) => queryBuilder,
+    {
+      from: () => countBuilder,
+      raw: (sql: string, _bindings?: unknown) => `RAW:${sql}`,
+      fn: { now: () => 'NOW()' },
+    },
+  );
+
+  return { knex: knex as unknown as Knex, queryBuilder, countBuilder };
+}
+
+// -- Mock Hono Context -------------------------------------
+
+export type MockContextOptions = {
+  query?: Record<string, string>;
+  queries?: Record<string, string[]>;
+  params?: Record<string, string>;
+  body?: unknown;
+  dbTables?: Record<string, ColumnInfoMap>;
+  user?: UserType;
+  roles?: RolesService;
+  queryResult?: unknown[];
+  countResult?: number;
+  writeResult?: unknown[];
+};
+
+export type MockContextResult = {
+  c: AppContext;
+  db: MockKnexResult;
+  dbWrite: MockKnexResult;
+  getSet: (key: string) => unknown;
+};
+
+export function createMockContext(opts: MockContextOptions = {}): MockContextResult {
+  const db = createMockKnex({
+    queryResult: opts.queryResult || [],
+    countResult: opts.countResult || 0,
+  });
+  const dbWrite = createMockKnex({
+    queryResult: opts.writeResult || [{ id: 1 }],
+  });
+
+  const store: Record<string, unknown> = {};
+
+  const c = {
+    req: {
+      query: () => opts.query || {},
+      queries: () => opts.queries || {},
+      param: () => opts.params || {},
+      json: async () => opts.body || {},
+    },
+    env: {
+      db: db.knex,
+      dbWrite: dbWrite.knex,
+      dbTables: opts.dbTables || {},
+      roles: opts.roles,
+    } satisfies EnvBindings as EnvBindings,
+    var: {
+      user: opts.user,
+    },
+    set: (key: string, value: unknown) => { store[key] = value; },
+  } as unknown as AppContext;
+
+  return {
+    c,
+    db,
+    dbWrite,
+    getSet: (key: string) => store[key],
+  };
+}
+
+// -- Standard table schemas for tests ----------------------
+
+export const usersColumns: ColumnInfoMap = {
+  id: { data_type: 'integer', is_nullable: 'NO' },
+  name: { data_type: 'string', is_nullable: 'NO' },
+  email: { data_type: 'string', is_nullable: 'YES' },
+  password: { data_type: 'string', is_nullable: 'NO' },
+  status: { data_type: 'string', is_nullable: 'YES' },
+  age: { data_type: 'integer', is_nullable: 'YES' },
+  userId: { data_type: 'integer', is_nullable: 'YES' },
+  isDeleted: { data_type: 'boolean', is_nullable: 'NO' },
+  timeCreated: { data_type: 'timestamp', is_nullable: 'NO' },
+  timeUpdated: { data_type: 'timestamp', is_nullable: 'YES' },
+};
+```
+
+### test/Routings.test.ts
+```ts
+import { describe, it, expect } from 'bun:test';
+import { Routings } from '../src/Routings';
+
+describe('Routings', () => {
+
+  // -- crud() route generation -----------------------------
+
+  describe('crud()', () => {
+    it('registers 6 routes for a table', () => {
+      const router = new Routings();
+      router.crud({ table: 'posts' });
+
+      const paths = router.routes.map((r) => `${r.method} ${r.path}`);
+
+      expect(paths).toContain('GET /posts');
+      expect(paths).toContain('POST /posts');
+      expect(paths).toContain('GET /posts/:id');
+      expect(paths).toContain('PUT /posts/:id');
+      expect(paths).toContain('PATCH /posts/:id');
+      expect(paths).toContain('DELETE /posts/:id');
+      expect(router.routes.length).toBe(6);
+    });
+
+    it('uses prefix when provided', () => {
+      const router = new Routings();
+      router.crud({ table: 'posts', prefix: 'api/v1/posts' });
+
+      const paths = router.routes.map((r) => r.path);
+      expect(paths).toContain('/api/v1/posts');
+      expect(paths).toContain('/api/v1/posts/:id');
+    });
+
+    it('normalizes double slashes in prefix', () => {
+      const router = new Routings();
+      router.crud({ table: 'posts', prefix: '/api//posts' });
+
+      const paths = router.routes.map((r) => r.path);
+      expect(paths[0]).toBe('/api//posts');
+      // leading slash normalization
+      expect(paths[0].startsWith('//')).toBe(false);
+    });
+
+    it('registers permissions for protected methods', () => {
+      const router = new Routings();
+      router.crud({
+        table: 'posts',
+        permissions: {
+          protectedMethods: ['POST', 'DELETE'],
+        },
+      });
+
+      expect(router.routesPermissions).toHaveProperty('POST /posts');
+      expect(router.routesPermissions).toHaveProperty('DELETE /posts/:id');
+      expect(router.routesPermissions).not.toHaveProperty('GET /posts');
+    });
+
+    it('expands wildcard * permissions to all methods', () => {
+      const router = new Routings();
+      router.crud({
+        table: 'items',
+        permissions: { protectedMethods: ['*'] },
+      });
+
+      expect(router.routesPermissions).toHaveProperty('GET /items');
+      expect(router.routesPermissions).toHaveProperty('POST /items');
+      expect(router.routesPermissions).toHaveProperty('PUT /items/:id');
+      expect(router.routesPermissions).toHaveProperty('PATCH /items/:id');
+      expect(router.routesPermissions).toHaveProperty('DELETE /items/:id');
+    });
+  });
+
+  // -- HTTP method helpers ---------------------------------
+
+  describe('HTTP methods', () => {
+    it('registers GET route', () => {
+      const router = new Routings();
+      router.get('/health', async () => {});
+
+      expect(router.routes.length).toBe(1);
+      expect(router.routes[0].method).toBe('GET');
+      expect(router.routes[0].path).toBe('/health');
+    });
+
+    it('registers POST route', () => {
+      const router = new Routings();
+      router.post('/items', async () => {});
+
+      expect(router.routes[0].method).toBe('POST');
+    });
+
+    it('registers PUT route', () => {
+      const router = new Routings();
+      router.put('/items/:id', async () => {});
+
+      expect(router.routes[0].method).toBe('PUT');
+    });
+
+    it('registers PATCH route', () => {
+      const router = new Routings();
+      router.patch('/items/:id', async () => {});
+
+      expect(router.routes[0].method).toBe('PATCH');
+    });
+
+    it('registers DELETE route', () => {
+      const router = new Routings();
+      router.delete('/items/:id', async () => {});
+
+      expect(router.routes[0].method).toBe('DELETE');
+    });
+
+    it('registers multiple handlers as separate routes', () => {
+      const router = new Routings();
+      const mw1 = async () => {};
+      const mw2 = async () => {};
+      router.get('/test', mw1, mw2);
+
+      expect(router.routes.length).toBe(2);
+    });
+
+    it('use() registers route without method', () => {
+      const router = new Routings();
+      router.use('/api/*', async () => {});
+
+      expect(router.routes[0].method).toBeUndefined();
+      expect(router.routes[0].path).toBe('/api/*');
+    });
+
+    it('all() registers route on wildcard path', () => {
+      const router = new Routings();
+      router.all(async () => {});
+
+      expect(router.routes[0].path).toBe('*');
+    });
+  });
+
+  // -- Errors ----------------------------------------------
+
+  describe('errors()', () => {
+    it('registers error definitions', () => {
+      const router = new Routings();
+      router.errors({
+        NOT_FOUND: { code: 1001, status: 404 },
+        BAD_INPUT: { code: 1002, status: 400, description: 'Invalid input' },
+      });
+
+      expect(router.routesErrors.NOT_FOUND.status).toBe(404);
+      expect(router.routesErrors.BAD_INPUT.description).toBe('Invalid input');
+    });
+
+    it('merges multiple error calls', () => {
+      const router = new Routings();
+      router.errors({ A: { code: 1, status: 400 } });
+      router.errors({ B: { code: 2, status: 404 } });
+
+      expect(router.routesErrors).toHaveProperty('A');
+      expect(router.routesErrors).toHaveProperty('B');
+    });
+
+    it('accepts array of error objects', () => {
+      const router = new Routings();
+      router.errors([
+        { A: { code: 1, status: 400 } },
+        { B: { code: 2, status: 404 } },
+      ]);
+
+      expect(router.routesErrors).toHaveProperty('A');
+      expect(router.routesErrors).toHaveProperty('B');
+    });
+  });
+
+  // -- Email templates -------------------------------------
+
+  describe('emailTemplates()', () => {
+    it('registers templates', () => {
+      const router = new Routings();
+      router.emailTemplates({
+        welcome: { subject: 'Hi', html: '<b>Hello</b>' },
+      });
+
+      expect(router.routesEmailTemplates.welcome.subject).toBe('Hi');
+    });
+
+    it('merges with existing templates', () => {
+      const router = new Routings();
+      router.emailTemplates({ a: { subject: 'A' } });
+      router.emailTemplates({ b: { subject: 'B' } });
+
+      expect(router.routesEmailTemplates).toHaveProperty('a');
+      expect(router.routesEmailTemplates).toHaveProperty('b');
+    });
+  });
+
+  // -- Constructor options ---------------------------------
+
+  describe('constructor', () => {
+    it('stores migrationDirs', () => {
+      const dirs = ['/path/to/migrations'];
+      const router = new Routings({ migrationDirs: dirs });
+
+      expect(router.migrationDirs).toEqual(dirs);
+    });
+
+    it('works without options', () => {
+      const router = new Routings();
+      expect(router.routes).toEqual([]);
+    });
+  });
+});
 ```
 

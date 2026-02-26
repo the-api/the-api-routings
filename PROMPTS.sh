@@ -146,6 +146,6 @@ done < <(find src -type f -name "*.ts" | sort)
 
 while IFS= read -r file; do
   append_file "$file" "ts"
-done < <(find test -type f -name "*.sh" | sort)
+done < <(find test -type f -name "*.ts" | sort)
 
 wc -l "$OUT_FILE"

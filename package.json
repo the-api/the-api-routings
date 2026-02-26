@@ -1,6 +1,6 @@
 {
   "name": "the-api-routings",
-  "version": "0.4.1",
+  "version": "0.5.1",
   "license": "MIT",
   "author": "Dimitry Ivanov <2@ivanoff.org.ua> # curl -A cv ivanoff.org.ua",
   "description": "Routings for the-api",

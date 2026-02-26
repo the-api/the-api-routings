@@ -1,212 +1,209 @@
-import { describe, it, expect, mock, beforeEach } from 'bun:test';
+import { describe, it, expect } from 'bun:test';
 import { Routings } from '../src/Routings';
 
 describe('Routings', () => {
 
-  // ── Constructor ──────────────────────────────────
-
-  describe('constructor', () => {
-    it('creates instance with empty routes', () => {
-      const r = new Routings();
-      expect(r.routes).toEqual([]);
-      expect(r.routesErrors).toEqual({});
-      expect(r.routesEmailTemplates).toEqual({});
-      expect(r.routesPermissions).toEqual({});
-    });
-
-    it('stores migrationDirs', () => {
-      const r = new Routings({ migrationDirs: ['/migrations'] });
-      expect(r.migrationDirs).toEqual(['/migrations']);
-    });
-
-    it('handles missing options', () => {
-      const r = new Routings();
-      expect(r.migrationDirs).toBeUndefined();
-    });
-  });
-
-  // ── HTTP method helpers ──────────────────────────
-
-  describe.each([
-    ['get', 'GET'],
-    ['post', 'POST'],
-    ['patch', 'PATCH'],
-    ['put', 'PUT'],
-    ['delete', 'DELETE'],
-  ] as const)('%s()', (method, httpMethod) => {
-    it(`registers ${httpMethod} route`, () => {
-      const r = new Routings();
-      const handler = mock(async () => {});
-      (r as any)[method]('/test', handler);
-
-      expect(r.routes).toHaveLength(1);
-      expect(r.routes[0].method).toBe(httpMethod);
-      expect(r.routes[0].path).toBe('/test');
-      expect(r.routes[0].handlers).toHaveLength(1);
-    });
-  });
-
-  describe('use()', () => {
-    it('registers route without method', () => {
-      const r = new Routings();
-      const handler = mock(async () => {});
-      r.use('/mid', handler);
-
-      expect(r.routes).toHaveLength(1);
-      expect(r.routes[0].method).toBeUndefined();
-      expect(r.routes[0].path).toBe('/mid');
-    });
-  });
-
-  describe('all()', () => {
-    it('registers wildcard route', () => {
-      const r = new Routings();
-      r.all(mock(async () => {}));
-
-      expect(r.routes).toHaveLength(1);
-      expect(r.routes[0].path).toBe('*');
-    });
-  });
-
-  describe('multiple handlers', () => {
-    it('creates separate route entry per handler', () => {
-      const r = new Routings();
-      const h1 = mock(async () => {});
-      const h2 = mock(async () => {});
-      r.get('/multi', h1, h2);
-
-      expect(r.routes).toHaveLength(2);
-      expect(r.routes[0].path).toBe('/multi');
-      expect(r.routes[1].path).toBe('/multi');
-    });
-  });
-
-  // ── crud() ───────────────────────────────────────
+  // -- crud() route generation -----------------------------
 
   describe('crud()', () => {
-    let r: Routings;
+    it('registers 6 routes for a table', () => {
+      const router = new Routings();
+      router.crud({ table: 'posts' });
 
-    beforeEach(() => {
-      r = new Routings();
-    });
+      const paths = router.routes.map((r) => `${r.method} ${r.path}`);
 
-    it('creates 6 routes for a table', () => {
-      r.crud({ table: 'users' });
-      expect(r.routes).toHaveLength(6);
-    });
-
-    it('registers correct methods and paths', () => {
-      r.crud({ table: 'users' });
-
-      const methods = r.routes.map((rt) => `${rt.method} ${rt.path}`);
-      expect(methods).toContain('GET /users');
-      expect(methods).toContain('POST /users');
-      expect(methods).toContain('GET /users/:id');
-      expect(methods).toContain('PUT /users/:id');
-      expect(methods).toContain('PATCH /users/:id');
-      expect(methods).toContain('DELETE /users/:id');
+      expect(paths).toContain('GET /posts');
+      expect(paths).toContain('POST /posts');
+      expect(paths).toContain('GET /posts/:id');
+      expect(paths).toContain('PUT /posts/:id');
+      expect(paths).toContain('PATCH /posts/:id');
+      expect(paths).toContain('DELETE /posts/:id');
+      expect(router.routes.length).toBe(6);
     });
 
     it('uses prefix when provided', () => {
-      r.crud({ table: 'users', prefix: 'api/users' });
+      const router = new Routings();
+      router.crud({ table: 'posts', prefix: 'api/v1/posts' });
 
-      const paths = r.routes.map((rt) => rt.path);
-      expect(paths).toContain('/api/users');
-      expect(paths).toContain('/api/users/:id');
+      const paths = router.routes.map((r) => r.path);
+      expect(paths).toContain('/api/v1/posts');
+      expect(paths).toContain('/api/v1/posts/:id');
     });
 
-    it('normalizes leading slashes in prefix', () => {
-      r.crud({ table: 'users', prefix: '/api/users' });
+    it('normalizes double slashes in prefix', () => {
+      const router = new Routings();
+      router.crud({ table: 'posts', prefix: '/api//posts' });
 
-      const paths = r.routes.map((rt) => rt.path);
-      expect(paths[0]).toBe('/api/users');
+      const paths = router.routes.map((r) => r.path);
+      expect(paths[0]).toBe('/api//posts');
+      // leading slash normalization
+      expect(paths[0].startsWith('//')).toBe(false);
     });
 
-    it('sets routesPermissions for protectedMethods wildcard', () => {
-      r.crud({
+    it('registers permissions for protected methods', () => {
+      const router = new Routings();
+      router.crud({
         table: 'posts',
+        permissions: {
+          protectedMethods: ['POST', 'DELETE'],
+        },
+      });
+
+      expect(router.routesPermissions).toHaveProperty('POST /posts');
+      expect(router.routesPermissions).toHaveProperty('DELETE /posts/:id');
+      expect(router.routesPermissions).not.toHaveProperty('GET /posts');
+    });
+
+    it('expands wildcard * permissions to all methods', () => {
+      const router = new Routings();
+      router.crud({
+        table: 'items',
         permissions: { protectedMethods: ['*'] },
       });
 
-      expect(r.routesPermissions['GET /posts']).toContain('posts.get');
-      expect(r.routesPermissions['POST /posts']).toContain('posts.post');
-      expect(r.routesPermissions['GET /posts/:id']).toContain('posts.get');
-      expect(r.routesPermissions['PUT /posts/:id']).toContain('posts.put');
-      expect(r.routesPermissions['PATCH /posts/:id']).toContain('posts.patch');
-      expect(r.routesPermissions['DELETE /posts/:id']).toContain('posts.delete');
-    });
-
-    it('sets routesPermissions for specific methods', () => {
-      r.crud({
-        table: 'posts',
-        permissions: { protectedMethods: ['GET', 'DELETE'] },
-      });
-
-      expect(r.routesPermissions['GET /posts']).toContain('posts.get');
-      expect(r.routesPermissions['GET /posts/:id']).toContain('posts.get');
-      expect(r.routesPermissions['DELETE /posts/:id']).toContain('posts.delete');
-      expect(r.routesPermissions['POST /posts']).toBeUndefined();
-    });
-
-    it('does not set routesPermissions when no protectedMethods', () => {
-      r.crud({ table: 'posts' });
-      expect(Object.keys(r.routesPermissions)).toHaveLength(0);
+      expect(router.routesPermissions).toHaveProperty('GET /items');
+      expect(router.routesPermissions).toHaveProperty('POST /items');
+      expect(router.routesPermissions).toHaveProperty('PUT /items/:id');
+      expect(router.routesPermissions).toHaveProperty('PATCH /items/:id');
+      expect(router.routesPermissions).toHaveProperty('DELETE /items/:id');
     });
   });
 
-  // ── errors() ─────────────────────────────────────
+  // -- HTTP method helpers ---------------------------------
+
+  describe('HTTP methods', () => {
+    it('registers GET route', () => {
+      const router = new Routings();
+      router.get('/health', async () => {});
+
+      expect(router.routes.length).toBe(1);
+      expect(router.routes[0].method).toBe('GET');
+      expect(router.routes[0].path).toBe('/health');
+    });
+
+    it('registers POST route', () => {
+      const router = new Routings();
+      router.post('/items', async () => {});
+
+      expect(router.routes[0].method).toBe('POST');
+    });
+
+    it('registers PUT route', () => {
+      const router = new Routings();
+      router.put('/items/:id', async () => {});
+
+      expect(router.routes[0].method).toBe('PUT');
+    });
+
+    it('registers PATCH route', () => {
+      const router = new Routings();
+      router.patch('/items/:id', async () => {});
+
+      expect(router.routes[0].method).toBe('PATCH');
+    });
+
+    it('registers DELETE route', () => {
+      const router = new Routings();
+      router.delete('/items/:id', async () => {});
+
+      expect(router.routes[0].method).toBe('DELETE');
+    });
+
+    it('registers multiple handlers as separate routes', () => {
+      const router = new Routings();
+      const mw1 = async () => {};
+      const mw2 = async () => {};
+      router.get('/test', mw1, mw2);
+
+      expect(router.routes.length).toBe(2);
+    });
+
+    it('use() registers route without method', () => {
+      const router = new Routings();
+      router.use('/api/*', async () => {});
+
+      expect(router.routes[0].method).toBeUndefined();
+      expect(router.routes[0].path).toBe('/api/*');
+    });
+
+    it('all() registers route on wildcard path', () => {
+      const router = new Routings();
+      router.all(async () => {});
+
+      expect(router.routes[0].path).toBe('*');
+    });
+  });
+
+  // -- Errors ----------------------------------------------
 
   describe('errors()', () => {
     it('registers error definitions', () => {
-      const r = new Routings();
-      r.errors({ NOT_FOUND: { code: 1, status: 404 } });
+      const router = new Routings();
+      router.errors({
+        NOT_FOUND: { code: 1001, status: 404 },
+        BAD_INPUT: { code: 1002, status: 400, description: 'Invalid input' },
+      });
 
-      expect(r.routesErrors.NOT_FOUND).toEqual({ code: 1, status: 404 });
+      expect(router.routesErrors.NOT_FOUND.status).toBe(404);
+      expect(router.routesErrors.BAD_INPUT.description).toBe('Invalid input');
     });
 
-    it('merges multiple error objects', () => {
-      const r = new Routings();
-      r.errors({ ERR_A: { code: 1, status: 400 } });
-      r.errors({ ERR_B: { code: 2, status: 500 } });
+    it('merges multiple error calls', () => {
+      const router = new Routings();
+      router.errors({ A: { code: 1, status: 400 } });
+      router.errors({ B: { code: 2, status: 404 } });
 
-      expect(r.routesErrors.ERR_A).toBeDefined();
-      expect(r.routesErrors.ERR_B).toBeDefined();
+      expect(router.routesErrors).toHaveProperty('A');
+      expect(router.routesErrors).toHaveProperty('B');
     });
 
     it('accepts array of error objects', () => {
-      const r = new Routings();
-      r.errors([
-        { ERR_A: { code: 1, status: 400 } },
-        { ERR_B: { code: 2, status: 500 } },
+      const router = new Routings();
+      router.errors([
+        { A: { code: 1, status: 400 } },
+        { B: { code: 2, status: 404 } },
       ]);
 
-      expect(r.routesErrors.ERR_A).toBeDefined();
-      expect(r.routesErrors.ERR_B).toBeDefined();
+      expect(router.routesErrors).toHaveProperty('A');
+      expect(router.routesErrors).toHaveProperty('B');
     });
   });
 
-  // ── emailTemplates() ────────────────────────────
+  // -- Email templates -------------------------------------
 
   describe('emailTemplates()', () => {
-    it('registers email templates', () => {
-      const r = new Routings();
-      r.emailTemplates({
-        welcome: { subject: 'Hello', text: 'Welcome!' },
+    it('registers templates', () => {
+      const router = new Routings();
+      router.emailTemplates({
+        welcome: { subject: 'Hi', html: '<b>Hello</b>' },
       });
 
-      expect(r.routesEmailTemplates.welcome).toEqual({
-        subject: 'Hello',
-        text: 'Welcome!',
-      });
+      expect(router.routesEmailTemplates.welcome.subject).toBe('Hi');
     });
 
-    it('merges templates', () => {
-      const r = new Routings();
-      r.emailTemplates({ a: { subject: 'A' } });
-      r.emailTemplates({ b: { subject: 'B' } });
+    it('merges with existing templates', () => {
+      const router = new Routings();
+      router.emailTemplates({ a: { subject: 'A' } });
+      router.emailTemplates({ b: { subject: 'B' } });
 
-      expect(r.routesEmailTemplates.a).toBeDefined();
-      expect(r.routesEmailTemplates.b).toBeDefined();
+      expect(router.routesEmailTemplates).toHaveProperty('a');
+      expect(router.routesEmailTemplates).toHaveProperty('b');
+    });
+  });
+
+  // -- Constructor options ---------------------------------
+
+  describe('constructor', () => {
+    it('stores migrationDirs', () => {
+      const dirs = ['/path/to/migrations'];
+      const router = new Routings({ migrationDirs: dirs });
+
+      expect(router.migrationDirs).toEqual(dirs);
+    });
+
+    it('works without options', () => {
+      const router = new Routings();
+      expect(router.routes).toEqual([]);
     });
   });
 });

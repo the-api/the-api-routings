@@ -19,29 +19,30 @@ var getQueryLimit = ({
     return;
   const defaultLimit = getPositiveIntFromEnv("LIMIT_DEFAULT");
   const maxLimit = getPositiveIntFromEnv("LIMIT_MAX");
-  let limit = _limit;
-  if ((typeof limit === "undefined" || limit === null || limit === "") && typeof defaultLimit !== "undefined") {
-    limit = defaultLimit;
-  }
-  if (!limit)
+  let limit = _limit != null && _limit !== "" ? +_limit : defaultLimit;
+  if (!limit || Number.isNaN(limit))
     return;
-  const limitNumber = +limit;
-  if (typeof maxLimit !== "undefined" && !Number.isNaN(limitNumber) && limitNumber > maxLimit) {
+  if (maxLimit && limit > maxLimit)
     return maxLimit;
-  }
   return limit;
 };
+var toPositiveInt = (value, fallback) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < fallback)
+    return fallback;
+  return Math.floor(n);
+};
+var toActionFlags = (input) => (input || []).reduce((acc, cur) => ({ ...acc, [cur]: true }), {});
 
 class CrudBuilder {
-  c;
   table;
   schema;
   aliases;
   join;
   joinOnDemand;
-  leftJoin;
+  leftJoinConfig;
   leftJoinDistinct;
-  lang;
+  defaultLang;
   translate;
   searchFields;
   requiredFields;
@@ -59,120 +60,119 @@ class CrudBuilder {
   includeDeleted;
   hiddenFields;
   readOnlyFields;
-  permissionViewableFields;
-  permissionEditableFields;
   showFieldsByPermission;
-  permissionCheckedMethods;
-  replacedOwnerPermissions;
+  ownerPermissions;
+  dbTables;
   cache;
   userIdFieldName;
   additionalFields;
   apiClientMethodNames;
-  dbTables;
-  coaliseWhere;
-  langJoin = {};
-  coaliseWhereReplacements;
-  user;
-  res;
-  isOwner;
-  rows;
   relations;
-  roles;
-  permissions;
-  ownerPermissions;
-  constructor({
-    c,
-    table,
-    schema,
-    aliases,
-    join,
-    joinOnDemand,
-    leftJoin,
-    leftJoinDistinct,
-    lang,
-    translate,
-    searchFields,
-    hiddenFields,
-    readOnlyFields,
-    permissions,
-    requiredFields,
-    defaultWhere,
-    defaultWhereRaw,
-    defaultSort,
-    sortRaw,
-    fieldsRaw,
-    tokenRequired,
-    ownerRequired,
-    rootRequired,
-    access,
-    accessByStatuses,
-    dbTables,
-    deletedReplacements,
-    includeDeleted,
-    cache,
-    userIdFieldName,
-    additionalFields,
-    apiClientMethodNames,
-    relations
-  }) {
-    this.c = c;
-    this.table = table;
-    this.schema = schema || "public";
-    this.aliases = aliases || {};
-    this.join = join || [];
-    this.joinOnDemand = joinOnDemand || [];
-    this.leftJoin = leftJoin || [];
-    this.leftJoinDistinct = !!leftJoinDistinct;
-    this.lang = lang || "en";
-    this.translate = translate || [];
-    this.showFieldsByPermission = permissions?.fields?.viewable || {};
-    this.ownerPermissions = permissions?.owner?.reduce((acc, cur) => ({ ...acc, [cur]: true }), {}) || {};
-    this.readOnlyFields = readOnlyFields || ["id", "timeCreated", "timeUpdated", "timeDeleted", "isDeleted"];
-    this.requiredFields = requiredFields || {};
-    this.defaultWhere = defaultWhere || {};
-    this.defaultWhereRaw = defaultWhereRaw;
-    this.defaultSort = defaultSort;
-    this.sortRaw = sortRaw;
-    this.fieldsRaw = fieldsRaw;
-    this.tokenRequired = tokenRequired?.reduce((acc, cur) => ({ ...acc, [cur]: true }), {}) || {};
-    this.ownerRequired = ownerRequired?.reduce((acc, cur) => ({ ...acc, [cur]: true }), {}) || {};
-    this.rootRequired = rootRequired?.reduce((acc, cur) => ({ ...acc, [cur]: true }), {}) || {};
-    this.access = access || {};
-    this.accessByStatuses = accessByStatuses || {};
-    this.searchFields = searchFields || [];
-    this.dbTables = dbTables || {};
-    this.deletedReplacements = deletedReplacements;
-    this.includeDeleted = typeof includeDeleted === "boolean" ? includeDeleted : !!this.deletedReplacements;
-    this.hiddenFields = hiddenFields || [];
-    this.coaliseWhere = {};
-    this.coaliseWhereReplacements = {};
-    this.cache = cache;
-    this.userIdFieldName = userIdFieldName || "userId";
-    this.additionalFields = additionalFields || {};
-    this.apiClientMethodNames = apiClientMethodNames || {};
-    this.relations = relations;
+  state;
+  constructor(options) {
+    this.table = options.table;
+    this.schema = options.schema || "public";
+    this.aliases = options.aliases || {};
+    this.join = options.join || [];
+    this.joinOnDemand = options.joinOnDemand || [];
+    this.leftJoinConfig = options.leftJoin || [];
+    this.leftJoinDistinct = !!options.leftJoinDistinct;
+    this.defaultLang = options.lang || "en";
+    this.translate = options.translate || [];
+    this.searchFields = options.searchFields || [];
+    this.requiredFields = options.requiredFields || {};
+    this.defaultWhere = options.defaultWhere || {};
+    this.defaultWhereRaw = options.defaultWhereRaw;
+    this.defaultSort = options.defaultSort;
+    this.sortRaw = options.sortRaw;
+    this.fieldsRaw = options.fieldsRaw;
+    this.tokenRequired = toActionFlags(options.tokenRequired);
+    this.ownerRequired = toActionFlags(options.ownerRequired);
+    this.rootRequired = toActionFlags(options.rootRequired);
+    this.access = options.access || {};
+    this.accessByStatuses = options.accessByStatuses || {};
+    this.deletedReplacements = options.deletedReplacements;
+    this.includeDeleted = typeof options.includeDeleted === "boolean" ? options.includeDeleted : !!options.deletedReplacements;
+    this.hiddenFields = options.hiddenFields || [];
+    this.readOnlyFields = options.readOnlyFields || ["id", "timeCreated", "timeUpdated", "timeDeleted", "isDeleted"];
+    this.showFieldsByPermission = options.permissions?.fields?.viewable || {};
+    this.ownerPermissions = options.permissions?.owner?.reduce((acc, cur) => ({ ...acc, [cur]: true }), {}) || {};
+    this.dbTables = options.dbTables || {};
+    this.cache = options.cache;
+    this.userIdFieldName = options.userIdFieldName || "userId";
+    this.additionalFields = options.additionalFields || {};
+    this.apiClientMethodNames = options.apiClientMethodNames || {};
+    this.relations = options.relations;
+  }
+  initState(c) {
+    const env = c.env;
+    this.state = {
+      res: this.getDbWithSchema(env.db),
+      rows: env.dbTables?.[`${this.schema}.${this.table}`] || {},
+      user: c.var?.user,
+      roles: env.roles,
+      lang: this.defaultLang,
+      coalesceWhere: {},
+      coalesceWhereReplacements: {},
+      langJoin: {}
+    };
   }
   getDbWithSchema(db) {
-    const result = db(this.table);
+    const qb = db(this.table);
     if (this.schema)
-      result.withSchema(this.schema);
-    return result;
+      qb.withSchema(this.schema);
+    return qb;
   }
-  getTableRows(c) {
-    return c.env.dbTables[`${this.schema}.${this.table}`] || {};
+  getKnownColumnNames() {
+    const names = new Set;
+    for (const col of Object.keys(this.state.rows))
+      names.add(col);
+    for (const col of Object.keys(this.aliases))
+      names.add(col);
+    for (const j of this.join)
+      names.add(j.alias || j.table);
+    for (const j of this.joinOnDemand)
+      names.add(j.alias || j.table);
+    return names;
   }
-  sort(sort, db) {
+  isValidSortField(field) {
+    const name = field.replace(/^-/, "");
+    if (/^random\(\)$/i.test(name))
+      return true;
+    return this.getKnownColumnNames().has(name);
+  }
+  isValidWhereKey(key) {
+    const cleanKey = key.replace(/^(_null_|_not_null_|_in_|_not_in_|_from_|_to_)/, "").replace(/[!~]$/, "");
+    if (this.state.rows[cleanKey])
+      return true;
+    if (cleanKey.includes(".")) {
+      const col = cleanKey.split(".").pop() || "";
+      return !!this.state.rows[col];
+    }
+    if (this.state.coalesceWhere[cleanKey])
+      return true;
+    if (this.state.langJoin[cleanKey])
+      return true;
+    return false;
+  }
+  sort(sortParam, db) {
     if (this.sortRaw)
-      this.res.orderByRaw(this.sortRaw);
-    const _sort = sort || this.defaultSort;
+      this.state.res.orderByRaw(this.sortRaw);
+    const _sort = sortParam || this.defaultSort;
     if (!_sort)
       return;
-    _sort.split(",").forEach((item) => {
-      if (item.match(/^random\(\)$/i))
-        return this.res.orderBy(db.raw("RANDOM()"));
-      const match = item.match(/^(-)?(.*)$/);
-      this.res.orderBy(match[2], match[1] && "desc", "last");
-    });
+    for (const item of _sort.split(",")) {
+      if (/^random\(\)$/i.test(item)) {
+        this.state.res.orderBy(db.raw("RANDOM()"));
+        continue;
+      }
+      if (!this.isValidSortField(item))
+        continue;
+      const match = item.match(/^(-)?(.+)$/);
+      if (!match)
+        continue;
+      this.state.res.orderBy(match[2], match[1] ? "desc" : "asc", "last");
+    }
   }
   pagination({
     _page,
@@ -183,104 +183,91 @@ class CrudBuilder {
     const limit = getQueryLimit({ _limit, _unlimited });
     if (!limit)
       return;
-    this.res.limit(limit);
-    const offset = _page ? (_page - 1) * limit : 0;
-    this.res.offset(offset + +_skip);
+    this.state.res.limit(limit);
+    const page = toPositiveInt(_page, 1);
+    const skip = toPositiveInt(_skip, 0);
+    const offset = (page - 1) * limit + skip;
+    this.state.res.offset(offset);
   }
-  whereNotIn(whereNotInObj) {
-    if (!whereNotInObj)
-      return;
-    for (const [key, value] of Object.entries(whereNotInObj)) {
-      this.res.whereNotIn(key, value);
-    }
-  }
-  where(whereObj, db) {
+  where(whereObj, db, options) {
     if (!whereObj)
       return;
+    const { trusted = false } = options || {};
     for (const [key, value] of Object.entries(whereObj)) {
-      if (this.langJoin[`${key}`]) {
-        this.res.whereRaw(`${this.langJoin[`${key}`]} = :_value`, { _value: value, lang: this.lang });
-      } else if (this.coaliseWhere[`${key}`] || this.coaliseWhere[`${key.replace(/!$/, "")}`]) {
+      if (!trusted && !this.isValidWhereKey(key))
+        continue;
+      if (this.state.langJoin[key]) {
+        this.state.res.whereRaw(`${this.state.langJoin[key]} = :_value`, { _value: value, lang: this.state.lang });
+      } else if (this.state.coalesceWhere[key] || this.state.coalesceWhere[key.replace(/!$/, "")]) {
         const key2 = key.replace(/!$/, "");
-        const isNnot = key.match(/!$/) ? "NOT" : "";
-        const coaliseWhere = this.coaliseWhere[`${key2}`];
-        const replacements = this.coaliseWhereReplacements;
+        const isNot = key.endsWith("!") ? "NOT" : "";
+        const coalesceWhere = this.state.coalesceWhere[key2];
+        const replacements = this.state.coalesceWhereReplacements;
         if (Array.isArray(value)) {
           for (const _value of value) {
-            this.res.orWhere(function() {
-              this.whereRaw(`${isNnot} ${coaliseWhere} = :_value`, { ...replacements, _value });
+            this.state.res.orWhere(function() {
+              this.whereRaw(`${isNot} ${coalesceWhere} = :_value`, { ...replacements, _value });
             });
           }
         } else {
-          this.res.whereRaw(`${isNnot} ${coaliseWhere} = :_value`, { ...replacements, _value: value });
+          this.state.res.whereRaw(`${isNot} ${coalesceWhere} = :_value`, { ...replacements, _value: value });
         }
-      } else if (key.match(/~$/)) {
-        this.res.where(key.replace(/~$/, ""), "ilike", value);
-      } else if (key.match(/!$/)) {
+      } else if (key.endsWith("~")) {
+        this.state.res.where(key.replace(/~$/, ""), "ilike", value);
+      } else if (key.endsWith("!")) {
+        const col = key.replace(/!$/, "");
         if (Array.isArray(value)) {
-          this.res.whereNotIn(key.replace(/!$/, ""), value);
+          this.state.res.whereNotIn(col, value);
         } else {
-          this.res.whereNot(key.replace(/!$/, ""), value);
+          this.state.res.whereNot(col, value);
         }
-      } else if (key.match(/^_null_/)) {
+      } else if (key.startsWith("_null_")) {
         const m = key.match(/^_null_(.+)$/);
-        this.res.whereNull(m?.[1]);
-      } else if (key.match(/^_in_/)) {
+        if (m)
+          this.state.res.whereNull(m[1]);
+      } else if (key.startsWith("_in_")) {
         try {
           const m = key.match(/^_in_(.+)$/);
-          this.res.whereIn(m?.[1], JSON.parse(value));
+          if (m)
+            this.state.res.whereIn(m[1], JSON.parse(value));
         } catch {
           throw new Error("ERROR_QUERY_VALUE");
         }
-      } else if (key.match(/^_not_in_/)) {
+      } else if (key.startsWith("_not_in_")) {
         try {
           const m = key.match(/^_not_in_(.+)$/);
-          this.res.whereNotIn(m?.[1], JSON.parse(value));
+          if (m)
+            this.state.res.whereNotIn(m[1], JSON.parse(value));
         } catch {
           throw new Error("ERROR_QUERY_VALUE");
         }
-      } else if (key.match(/^_not_null_/)) {
+      } else if (key.startsWith("_not_null_")) {
         const m = key.match(/^_not_null_(.+)$/);
-        this.res.whereNotNull(m?.[1]);
-      } else if (key.match(/_(from|to)_/)) {
+        if (m)
+          this.state.res.whereNotNull(m[1]);
+      } else if (/_(?:from|to)_/.test(key)) {
         if (value !== "") {
           const m = key.match(/_(from|to)_(.+)$/);
-          const sign = m?.[1] === "from" ? ">=" : "<=";
-          const coaliseWhere = this.coaliseWhere[`${m?.[2]}`];
-          if (coaliseWhere) {
-            this.res.whereRaw(`${coaliseWhere} ${sign} ?`, [value]);
+          if (!m)
+            continue;
+          const sign = m[1] === "from" ? ">=" : "<=";
+          const coalesceWhere = this.state.coalesceWhere[m[2]];
+          if (coalesceWhere) {
+            this.state.res.whereRaw(`${coalesceWhere} ${sign} ?`, [value]);
           } else {
-            this.res.where(`${m?.[2]}`, sign, value);
+            this.state.res.where(m[2], sign, value);
           }
         }
       } else if (Array.isArray(value)) {
-        this.res.whereIn(key, value);
+        this.state.res.whereIn(key, value);
       } else if (value === null) {
-        this.res.whereNull(key);
-      } else if (this.leftJoin && !key.includes(".")) {
-        this.res.where({ [`${this.table}.${key}`]: value });
+        this.state.res.whereNull(key);
+      } else if (this.leftJoinConfig.length && !key.includes(".")) {
+        this.state.res.where({ [`${this.table}.${key}`]: value });
       } else {
-        this.res.where(key, value);
+        this.state.res.where(key, value);
       }
     }
-  }
-  getHiddenFields() {
-    if (!this.roles)
-      return { regular: this.hiddenFields, owner: this.hiddenFields };
-    const permissions = this.roles.getPermissions(this.user?.roles);
-    let toShow = [];
-    let ownerToShow = [];
-    for (const [key, value] of Object.entries(this.showFieldsByPermission)) {
-      const hasPermission = this.roles.checkWildcardPermissions({ key, permissions });
-      if (hasPermission)
-        toShow = toShow.concat(value);
-      const ownerHasPermission = this.roles.checkWildcardPermissions({ key, permissions: this.ownerPermissions });
-      if (ownerHasPermission)
-        ownerToShow = ownerToShow.concat(value);
-    }
-    const regular = this.hiddenFields?.filter((item) => !toShow.includes(item)) || [];
-    const owner = this.hiddenFields?.filter((item) => !ownerToShow.includes(item)) || [];
-    return { regular, owner };
   }
   fields({
     c,
@@ -289,12 +276,13 @@ class CrudBuilder {
     db,
     _sort
   }) {
-    let f = _fields && _fields.split(",").filter((item) => item !== "-relations");
-    if (this.leftJoin.length) {
-      this.leftJoin.map((item) => this.res.leftJoin(...item));
+    let f = _fields?.split(",").filter((item) => item !== "-relations");
+    if (this.leftJoinConfig.length) {
+      for (const item of this.leftJoinConfig)
+        this.state.res.leftJoin(...item);
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || "").replace(/(^|,)-/g, ",").split(",").filter(Boolean);
-        this.res.distinct(!f ? [] : sortArr.map((item) => !f.includes(item) && `${this.table}.${item}`).filter(Boolean));
+        this.state.res.distinct(!f ? [] : sortArr.map((item) => !f.includes(item) && `${this.table}.${item}`).filter(Boolean));
       }
     }
     let join = [...this.join];
@@ -302,45 +290,46 @@ class CrudBuilder {
       const joinNames = Array.isArray(_join) ? _join : _join.split(",");
       for (const joinName of joinNames) {
         const toJoin = this.joinOnDemand.filter(({ table, alias }) => joinName === alias || joinName === table);
-        if (toJoin.length)
+        if (toJoin.length) {
           join = join.concat(toJoin.filter((j) => !join.find(({ table, alias }) => table === j.table && alias === j.alias)));
+        }
       }
     }
     if (f) {
-      join = join.filter(({ table, alias }) => f.includes(table) || f.includes(alias));
+      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
       f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
-    let joinCoaleise = (f || Object.keys(this.rows)).map((l) => `${this.table}.${l}`);
-    if (this.includeDeleted && this.deletedReplacements && this.rows.isDeleted) {
-      joinCoaleise = joinCoaleise.map((item) => {
+    let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);
+    if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
+      joinCoalesce = joinCoalesce.map((item) => {
         const [tableName, fieldName] = item.split(".");
-        const replaceWith = this.deletedReplacements[`${fieldName}`];
+        const replaceWith = this.deletedReplacements?.[fieldName];
         if (typeof replaceWith === "undefined")
           return item;
         return db.raw(`CASE WHEN "${this.table}"."isDeleted" THEN :replaceWith ELSE "${tableName}"."${fieldName}" END AS ${fieldName}`, { replaceWith });
       });
     }
     for (const field of Object.keys(this.aliases)) {
-      joinCoaleise.push(`${this.table}.${field} AS ${this.aliases[`${field}`]}`);
+      joinCoalesce.push(`${this.table}.${field} AS ${this.aliases[field]}`);
     }
-    if (this.lang && this.lang !== "en") {
+    if (this.state.lang && this.state.lang !== "en") {
       for (const field of this.translate) {
-        this.langJoin[`${field}`] = `COALESCE( (
+        this.state.langJoin[field] = `COALESCE( (
           select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}" 
+            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
-        joinCoaleise.push(db.raw(this.langJoin[`${field}`] + `AS "${field}"`, { lang: this.lang }));
+        joinCoalesce.push(db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }));
       }
     }
     for (const {
       table,
       schema,
       as,
-      where,
+      where: joinWhere,
       whereBindings,
       alias,
       defaultValue,
-      fields,
+      fields: joinFields,
       field,
       limit,
       orderBy,
@@ -348,101 +337,137 @@ class CrudBuilder {
       leftJoin
     } of join) {
       if (!table && field) {
-        joinCoaleise.push(db.raw(`${field} AS ${alias || field}`));
+        joinCoalesce.push(db.raw(`${field} AS ${alias || field}`));
         continue;
       }
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : "";
       const limitStr = limit ? `LIMIT ${limit}` : "";
-      const lang = table === "lang" && this.lang && this.lang.match(/^\w{2}$/) ? `AND lang='${this.lang}'` : "";
-      const ff = fields?.map((item) => typeof item === "string" ? `'${item}', "${as || table}"."${item}"` : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`);
+      const lang = table === "lang" && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : "";
+      const ff = joinFields?.map((item) => typeof item === "string" ? `'${item}', "${as || table}"."${item}"` : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`);
       const f2 = ff ? `json_build_object(${ff.join(", ")})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
       const wb = {};
       if (whereBindings) {
-        if (!c)
-          continue;
-        const envAll = c.env;
-        const query = c.req.query();
-        const params = c.req.param();
-        const env = { ...envAll };
-        [
-          "db",
-          "dbWrite",
-          "dbTables",
-          "error",
-          "getErrorByMessage",
-          "log"
-        ].map((key) => delete env[`${key}`]);
-        const dd = flattening({ env, params, query });
-        for (const [k, v] of Object.entries(whereBindings))
-          wb[`${k}`] = dd[`${v}`] || null;
+        const envAll = { ...c.env };
+        ["db", "dbWrite", "dbTables", "error", "getErrorByMessage", "log"].forEach((key) => delete envAll[key]);
+        const dd = flattening({
+          env: envAll,
+          params: c.req.param(),
+          query: c.req.query()
+        });
+        for (const [k, v] of Object.entries(whereBindings)) {
+          wb[k] = dd[v] ?? null;
+        }
       }
       const leftJoinStr = !leftJoin ? "" : typeof leftJoin === "string" ? `LEFT JOIN ${leftJoin}` : `LEFT JOIN "${leftJoin[0]}" ON ${leftJoin[1]} = ${leftJoin[2]}`;
       const index = typeof byIndex === "number" ? `[${byIndex}]` : "";
       const schemaStr = !schema ? "" : `"${schema}".`;
       const dValue = defaultValue ? `'${defaultValue}'` : "NULL";
-      const coaliseWhere = `COALESCE( ( SELECT ${f3} FROM (
+      const coalesceWhere = `COALESCE( ( SELECT ${f3} FROM (
         SELECT * FROM ${schemaStr}"${table}" AS "${as || table}"
         ${leftJoinStr}
-        WHERE ${where} ${lang}
+        WHERE ${joinWhere} ${lang}
         ${orderByStr}
         ${limitStr}
       ) "${as || table}")${index}, ${dValue})`;
-      this.coaliseWhere = { ...this.coaliseWhere, [`${alias || table}`]: coaliseWhere };
-      this.coaliseWhereReplacements = { ...this.coaliseWhereReplacements, ...wb };
-      let sqlToJoin = `${coaliseWhere} AS "${alias || table}"`;
-      if (this.includeDeleted && this.deletedReplacements && this.rows.isDeleted) {
-        const replaceWith = this.deletedReplacements[`${table}`] || this.deletedReplacements[`${as}`] || this.deletedReplacements[`${alias}`];
+      this.state.coalesceWhere[alias || table] = coalesceWhere;
+      this.state.coalesceWhereReplacements = {
+        ...this.state.coalesceWhereReplacements,
+        ...wb
+      };
+      let sqlToJoin = `${coalesceWhere} AS "${alias || table}"`;
+      if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
+        const replaceWith = this.deletedReplacements[table] ?? (as ? this.deletedReplacements[as] : undefined) ?? (alias ? this.deletedReplacements[alias] : undefined);
         if (typeof replaceWith !== "undefined") {
-          sqlToJoin = `CASE WHEN "${this.table}"."isDeleted" THEN ${replaceWith} ELSE ${coaliseWhere} END AS "${alias || table}"`;
+          sqlToJoin = `CASE WHEN "${this.table}"."isDeleted" THEN ${replaceWith} ELSE ${coalesceWhere} END AS "${alias || table}"`;
         }
       }
-      joinCoaleise.push(db.raw(sqlToJoin, wb));
+      joinCoalesce.push(db.raw(sqlToJoin, wb));
     }
     if (c.req.query()._search && this.searchFields.length) {
       const searchColumnsStr = this.searchFields.map((name) => {
-        const searchName = this.langJoin[`${name}`] || `"${name}"`;
+        const searchName = this.state.langJoin[name] || `"${name}"`;
         return `COALESCE(${searchName} <-> :_search, 1)`;
       }).join(" + ");
-      joinCoaleise.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, { ...c.req.query(), lang: this.lang }));
+      joinCoalesce.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, { ...c.req.query(), lang: this.state.lang }));
       if (!_sort)
-        this.res.orderBy("_search_distance", "ASC");
+        this.state.res.orderBy("_search_distance", "ASC");
     }
-    this.res.column(joinCoaleise.concat(this.fieldsRaw || []));
+    this.state.res.column(joinCoalesce.concat(this.fieldsRaw || []));
   }
   checkDeleted() {
-    if (this.includeDeleted || !this.rows.isDeleted)
+    if (this.includeDeleted || !this.state.rows.isDeleted)
       return;
-    this.res.where({ [`${this.table}.isDeleted`]: false });
+    this.state.res.where({ [`${this.table}.isDeleted`]: false });
   }
   getJoinFields() {
     return this.join.reduce((acc, { alias, table, field }) => {
-      let type = !field && "ARRAY";
-      if (!type)
-        type = field.match(/::bool$/) && "boolean";
-      if (!type)
-        type = field.match(/::int$/) && "integer";
-      if (!type)
-        type = "string";
+      let type = !field ? "ARRAY" : field.match(/::bool$/) ? "boolean" : field.match(/::int$/) ? "integer" : "string";
       acc[alias || table] = type;
       return acc;
     }, {});
   }
+  getHiddenFields() {
+    if (!this.state.roles) {
+      return { regular: this.hiddenFields, owner: this.hiddenFields };
+    }
+    const permissions = this.state.roles.getPermissions(this.state.user?.roles);
+    let toShow = [];
+    let ownerToShow = [];
+    for (const [key, value] of Object.entries(this.showFieldsByPermission)) {
+      if (this.state.roles.checkWildcardPermissions({ key, permissions })) {
+        toShow = toShow.concat(value);
+      }
+      if (this.state.roles.checkWildcardPermissions({ key, permissions: this.ownerPermissions })) {
+        ownerToShow = ownerToShow.concat(value);
+      }
+    }
+    return {
+      regular: this.hiddenFields.filter((item) => !toShow.includes(item)),
+      owner: this.hiddenFields.filter((item) => !ownerToShow.includes(item))
+    };
+  }
   deleteHiddenFieldsFromResult(result, hiddenFields) {
-    if (!hiddenFields)
+    if (!result || !hiddenFields)
       return;
-    const isOwner = this.user?.id && result[`${this.userIdFieldName}`] === this.user?.id;
-    hiddenFields[isOwner ? "owner" : "regular"].map((key) => delete result[`${key}`]);
+    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const fields = hiddenFields[isOwner ? "owner" : "regular"];
+    for (const key of fields)
+      delete result[key];
+  }
+  filterDataByTableColumns(data, rows) {
+    const filtered = {};
+    for (const key of Object.keys(data)) {
+      if (rows[key] && !this.readOnlyFields.includes(key)) {
+        filtered[key] = data[key];
+      }
+    }
+    return filtered;
+  }
+  updateData(c, data) {
+    for (const [key, errorCode] of Object.entries(this.requiredFields)) {
+      if (!data[key])
+        throw new Error(errorCode);
+    }
+    const rows = this.state.rows;
+    const filtered = this.filterDataByTableColumns(data, rows);
+    if (rows.userId && this.state.user) {
+      filtered.userId = this.state.user.id;
+    }
+    return filtered;
+  }
+  updateIncomingData(c, data) {
+    return Array.isArray(data) ? data.map((item) => this.updateData(c, item)) : this.updateData(c, data);
   }
   optionsGet() {
     const fields = {};
     const fieldsSearchLike = {};
     const fieldsFromTo = {};
     const fieldsNull = {};
-    for (const [key, data] of Object.entries(this.dbTables || {})) {
+    for (const [key, data] of Object.entries(this.dbTables)) {
       if (!data)
         continue;
-      fields[`${key}`] = data.data_type;
+      fields[key] = data.data_type;
       if (data.data_type === "string")
         fieldsSearchLike[`${key}~`] = data.data_type;
       if (data.is_nullable === "YES") {
@@ -456,30 +481,6 @@ class CrudBuilder {
         fieldsFromTo[`_not_in_${key}`] = data.data_type;
       }
     }
-    const queryParameters = {
-      ...fields,
-      ...fieldsSearchLike,
-      ...fieldsNull,
-      ...fieldsFromTo,
-      ...this.additionalFields?.get,
-      _fields: {
-        type: "string",
-        example: "id,name"
-      },
-      _sort: {
-        type: "string",
-        example: "-timeCreated,name,random()"
-      },
-      _join: {
-        type: "string",
-        example: "table1,alias1"
-      },
-      _limit: "integer",
-      _page: "integer",
-      _skip: "integer",
-      _lang: "string",
-      ...this.searchFields.length && { _search: "string" }
-    };
     return {
       tokenRequired: this.tokenRequired.get || this.access.read || this.accessByStatuses.read,
       ownerRequired: this.ownerRequired.get,
@@ -489,117 +490,23 @@ class CrudBuilder {
       joinOnDemand: this.joinOnDemand,
       accessByStatuses: this.accessByStatuses.read,
       additionalFields: this.additionalFields.get,
-      queryParameters,
+      queryParameters: {
+        ...fields,
+        ...fieldsSearchLike,
+        ...fieldsNull,
+        ...fieldsFromTo,
+        ...this.additionalFields?.get,
+        _fields: { type: "string", example: "id,name" },
+        _sort: { type: "string", example: "-timeCreated,name,random()" },
+        _join: { type: "string", example: "table1,alias1" },
+        _limit: "integer",
+        _page: "integer",
+        _skip: "integer",
+        _lang: "string",
+        ...this.searchFields.length && { _search: "string" }
+      },
       apiClientMethodNames: this.apiClientMethodNames
     };
-  }
-  async get(c) {
-    const { result, meta } = await this.getRequestResult(c);
-    c.set("meta", meta);
-    c.set("result", result);
-    c.set("relationsData", this.relations);
-  }
-  async getRequestResult(c, q) {
-    const { db, roles } = c.env;
-    const { user } = c.var;
-    this.roles = roles;
-    this.user = user;
-    const queries = q || c.req.queries();
-    let queriesWithoutArrays = {};
-    for (const [queryName, queryValue] of Object.entries(queries)) {
-      queriesWithoutArrays[`${queryName}`] = queryValue?.length === 1 ? queryValue[0] : queryValue;
-    }
-    const {
-      _fields,
-      _sort,
-      _page,
-      _skip,
-      _limit,
-      _unlimited,
-      _after,
-      _lang,
-      _search,
-      _join,
-      ...where
-    } = queriesWithoutArrays;
-    if (_lang)
-      this.lang = _lang;
-    this.rows = this.getTableRows(c);
-    this.res = this.getDbWithSchema(c.env.db);
-    this.fields({ c, _fields, _join, db, _sort });
-    this.where({ ...this.defaultWhere, ...where }, db);
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.res.andWhere(function() {
-        this.whereRaw(whereStr);
-      });
-    }
-    if (_search && this.searchFields.length) {
-      const whereStr = this.searchFields.map((name) => {
-        const searchName = this.langJoin[`${name}`] || `"${name}"`;
-        return `${searchName} % :_search`;
-      }).join(" OR ");
-      const lang = this.lang;
-      this.res.andWhere(function() {
-        this.whereRaw(whereStr, { _search, lang });
-      });
-    }
-    this.checkDeleted();
-    const total = +(await db.from({ w: this.res }).count("*"))[0].count;
-    this.sort(_sort, db);
-    const s = _sort || this.defaultSort;
-    const sName = s?.replace(/^-/, "");
-    const limit = getQueryLimit({ _limit, _unlimited });
-    if (_after && limit && s && this.getTableRows(c)[`${sName}`]) {
-      this.res.where(sName, s[0] === "-" ? "<" : ">", _after);
-      this.res.limit(limit);
-    } else
-      this.pagination({
-        _page,
-        _skip,
-        _limit: limit,
-        _unlimited
-      });
-    const result = await this.res;
-    const nextAfterData = result?.at(-1)?.[`${sName}`];
-    const addAfterMs = s?.[0] === "-" ? "000" : "999";
-    const nextAfter = nextAfterData instanceof Date ? new Date(nextAfterData).toISOString().replace("Z", `${addAfterMs}Z`) : nextAfterData;
-    let meta = { total };
-    if (_after) {
-      meta = {
-        ...meta,
-        after: _after,
-        nextAfter: nextAfter ? encodeURIComponent(nextAfter) : undefined
-      };
-      meta = {
-        ...meta,
-        isFirstPage: false,
-        isLastPage: !result.length || (limit ? result.length < +limit : false)
-      };
-    } else {
-      const limit2 = +limit;
-      const skip = +_skip || 0;
-      const page = +_page || 1;
-      const pages = !limit2 ? 1 : Math.ceil((total - skip) / limit2);
-      meta = {
-        ...meta,
-        limit: limit2,
-        skip,
-        page,
-        pages,
-        nextAfter: page === 1 && nextAfter ? encodeURIComponent(nextAfter) : undefined,
-        nextPage: page >= pages ? undefined : page + 1,
-        isFirstPage: page <= 1,
-        isLastPage: page >= pages
-      };
-    }
-    const hiddenFields = this.getHiddenFields();
-    if (hiddenFields) {
-      for (let i = 0;i < result.length; i++) {
-        this.deleteHiddenFieldsFromResult(result[i], hiddenFields);
-      }
-    }
-    return { result, meta };
   }
   optionsGetById() {
     return {
@@ -614,113 +521,21 @@ class CrudBuilder {
       apiClientMethodNames: this.apiClientMethodNames
     };
   }
-  async getById(c) {
-    const { db, roles } = c.env;
-    this.roles = roles;
-    this.user = c.var.user;
-    const { id } = c.req.param();
-    const {
-      _fields,
-      _lang,
-      _join,
-      ...whereWithParams
-    } = c.req.query();
-    const where = Object.keys(whereWithParams).reduce((acc, key) => {
-      if (key[0] !== "_") {
-        const isInt = this.dbTables?.[`${key}`]?.data_type === "integer";
-        const hasNaN = [].concat(whereWithParams[`${key}`]).find((item) => Number.isNaN(+item));
-        if (isInt && hasNaN)
-          throw new Error("INTEGER_REQUIRED");
-        acc[`${key}`] = whereWithParams[`${key}`];
-      }
-      return acc;
-    }, {});
-    this.lang = _lang;
-    this.rows = this.getTableRows(c);
-    this.res = this.getDbWithSchema(c.env.db);
-    if (this.dbTables?.id?.data_type === "integer" && Number.isNaN(+id))
-      throw new Error("INTEGER_REQUIRED");
-    this.where({ ...where, [`${this.table}.id`]: id }, db);
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.res.andWhere(function() {
-        this.whereRaw(whereStr);
-      });
-    }
-    this.checkDeleted();
-    this.fields({
-      c,
-      _fields,
-      _join,
-      db
-    });
-    const result = await this.res.first();
-    this.deleteHiddenFieldsFromResult(result, this.getHiddenFields());
-    c.set("result", result);
-    c.set("relationsData", this.relations);
-  }
-  updateIncomingData(c, data) {
-    return Array.isArray(data) ? data.map((item) => this.updateData(c, item)) : this.updateData(c, data);
-  }
-  updateData(c, data) {
-    const { user } = c.var;
-    let result = { ...data };
-    const rows = this.getTableRows(c);
-    for (const [key, error_code] of Object.entries(this.requiredFields)) {
-      if (!result[`${key}`])
-        throw new Error(error_code);
-    }
-    for (const key of this.readOnlyFields) {
-      delete result[`${key}`];
-    }
-    result = { ...c.req.param(), ...result };
-    for (const r of Object.keys(result)) {
-      if (rows[`${r}`] && typeof result[`${r}`] !== "undefined")
-        continue;
-      delete result[`${r}`];
-    }
-    if (rows.userId && user)
-      result.userId = user.id;
-    return result;
-  }
   optionsAdd() {
-    const schema = Object.entries(this.dbTables || {}).reduce((acc, [key, data]) => {
-      const keyForbiddeen = this.readOnlyFields.includes(key);
-      return keyForbiddeen ? acc : { ...acc, [key]: data };
-    }, this.additionalFields?.add || {});
+    const schema = Object.entries(this.dbTables).reduce((acc, [key, data]) => this.readOnlyFields.includes(key) ? acc : { ...acc, [key]: data }, this.additionalFields?.add || {});
     return {
       tokenRequired: this.tokenRequired.add || this.access.create || this.accessByStatuses.create,
       ownerRequired: this.ownerRequired.add,
       rootRequired: this.rootRequired.add,
       readOnlyFields: this.readOnlyFields,
       requiredFields: Object.keys(this.requiredFields),
-      accessByStatuses: this.accessByStatuses.add,
+      accessByStatuses: this.accessByStatuses.create,
       apiClientMethodNames: this.apiClientMethodNames,
       schema
     };
   }
-  async add(c) {
-    const requestBody = await c.req.json();
-    const bodyKeys = Object.keys(requestBody);
-    const looksLikeArray = bodyKeys.length && bodyKeys.every((j, i) => i === +j);
-    const body = looksLikeArray ? Object.values(requestBody) : requestBody;
-    const data = this.updateIncomingData(c, body);
-    for (const key of Object.keys(data)) {
-      const isInt = this.dbTables?.[`${key}`]?.data_type === "integer";
-      const hasNaN = [].concat(data[`${key}`]).find((item) => item && Number.isNaN(+item));
-      if (isInt && hasNaN)
-        throw new Error("INTEGER_REQUIRED");
-      data[`${key}`] = data[`${key}`] ?? null;
-    }
-    const result = await this.getDbWithSchema(c.env.dbWrite).insert(data).returning("*");
-    c.set("result", result[0]);
-    c.set("relationsData", this.relations);
-  }
   optionsUpdate() {
-    const schema = Object.entries(this.dbTables || {}).reduce((acc, [key, data]) => {
-      const keyForbiddeen = this.readOnlyFields.includes(key);
-      return keyForbiddeen ? acc : { ...acc, [key]: data };
-    }, this.additionalFields?.update || {});
+    const schema = Object.entries(this.dbTables).reduce((acc, [key, data]) => this.readOnlyFields.includes(key) ? acc : { ...acc, [key]: data }, this.additionalFields?.update || {});
     return {
       tokenRequired: this.tokenRequired.update || this.access.update || this.accessByStatuses.update,
       ownerRequired: this.ownerRequired.update,
@@ -732,25 +547,6 @@ class CrudBuilder {
       schema
     };
   }
-  async update(c) {
-    const { db } = c.env;
-    const where = { ...c.req.param() };
-    if (this.dbTables?.id?.data_type === "integer" && Number.isNaN(+where.id))
-      throw new Error("INTEGER_REQUIRED");
-    const rows = this.getTableRows(c);
-    if (rows.isDeleted)
-      where.isDeleted = false;
-    const data = await c.req.json();
-    for (const key of this.readOnlyFields) {
-      delete data[`${key}`];
-    }
-    if (Object.keys(data).length) {
-      if (rows.timeUpdated)
-        data.timeUpdated = db.fn.now();
-      await this.getDbWithSchema(c.env.dbWrite).update(data).where(where);
-    }
-    await this.getById(c);
-  }
   optionsDelete() {
     return {
       tokenRequired: this.tokenRequired.delete || this.access.delete || this.accessByStatuses.delete,
@@ -760,15 +556,197 @@ class CrudBuilder {
       apiClientMethodNames: this.apiClientMethodNames
     };
   }
-  async delete(c) {
-    const { user } = c.var;
-    const where = { ...c.req.param() };
-    if (this.dbTables?.id?.data_type === "integer" && Number.isNaN(+where.id))
+  async get(c) {
+    const { result, meta } = await this.getRequestResult(c);
+    c.set("meta", meta);
+    c.set("result", result);
+    c.set("relationsData", this.relations);
+  }
+  async getRequestResult(c, q) {
+    this.initState(c);
+    const db = c.env.db;
+    const queries = q || c.req.queries();
+    const queriesFlat = {};
+    for (const [name, value] of Object.entries(queries)) {
+      queriesFlat[name] = value?.length === 1 ? value[0] : value;
+    }
+    const {
+      _fields,
+      _sort,
+      _page,
+      _skip,
+      _limit,
+      _unlimited,
+      _after,
+      _lang,
+      _search,
+      _join,
+      ...where
+    } = queriesFlat;
+    if (_lang)
+      this.state.lang = _lang;
+    this.fields({ c, _fields, _join, db, _sort });
+    this.where(this.defaultWhere, db, { trusted: true });
+    this.where(where, db);
+    if (this.defaultWhereRaw) {
+      const whereStr = this.defaultWhereRaw;
+      this.state.res.andWhere(function() {
+        this.whereRaw(whereStr);
+      });
+    }
+    if (_search && this.searchFields.length) {
+      const whereStr = this.searchFields.map((name) => {
+        const searchName = this.state.langJoin[name] || `"${name}"`;
+        return `${searchName} % :_search`;
+      }).join(" OR ");
+      const lang = this.state.lang;
+      this.state.res.andWhere(function() {
+        this.whereRaw(whereStr, { _search, lang });
+      });
+    }
+    this.checkDeleted();
+    const total = +(await db.from({ w: this.state.res }).count("*"))[0].count;
+    this.sort(_sort, db);
+    const sortFields = (_sort || this.defaultSort || "").split(",").filter(Boolean);
+    const firstSortField = sortFields[0];
+    const cursorColumnName = firstSortField?.replace(/^-/, "");
+    const limit = getQueryLimit({
+      _limit,
+      _unlimited
+    });
+    if (_after && limit && firstSortField && cursorColumnName && this.state.rows[cursorColumnName]) {
+      const direction = firstSortField.startsWith("-") ? "<" : ">";
+      this.state.res.where(cursorColumnName, direction, _after);
+      this.state.res.limit(limit);
+    } else {
+      this.pagination({
+        _page,
+        _skip,
+        _limit: limit,
+        _unlimited
+      });
+    }
+    const result = await this.state.res;
+    const nextAfterData = cursorColumnName ? result?.at(-1)?.[cursorColumnName] : undefined;
+    const addAfterMs = firstSortField?.startsWith("-") ? "000" : "999";
+    const nextAfter = nextAfterData instanceof Date ? new Date(nextAfterData).toISOString().replace("Z", `${addAfterMs}Z`) : nextAfterData;
+    let meta = { total };
+    if (_after) {
+      meta = {
+        ...meta,
+        after: _after,
+        nextAfter: nextAfter ? encodeURIComponent(String(nextAfter)) : undefined,
+        isFirstPage: false,
+        isLastPage: !result.length || (limit ? result.length < limit : false)
+      };
+    } else {
+      const limitNum = limit || 0;
+      const skip = toPositiveInt(_skip, 0);
+      const page = toPositiveInt(_page, 1);
+      const pages = !limitNum ? 1 : Math.max(1, Math.ceil(Math.max(0, total - skip) / limitNum));
+      meta = {
+        ...meta,
+        limit: limitNum,
+        skip,
+        page,
+        pages,
+        nextAfter: page === 1 && nextAfter ? encodeURIComponent(String(nextAfter)) : undefined,
+        nextPage: page >= pages ? undefined : page + 1,
+        isFirstPage: page <= 1,
+        isLastPage: page >= pages
+      };
+    }
+    const hiddenFields = this.getHiddenFields();
+    for (const row of result) {
+      this.deleteHiddenFieldsFromResult(row, hiddenFields);
+    }
+    return { result, meta };
+  }
+  async getById(c) {
+    this.initState(c);
+    const db = c.env.db;
+    const { id } = c.req.param();
+    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+    const where = {};
+    for (const [key, val] of Object.entries(whereWithParams)) {
+      if (key.startsWith("_"))
+        continue;
+      const isInt = this.dbTables?.[key]?.data_type === "integer";
+      const hasNaN = [].concat(val).find((item) => Number.isNaN(+item));
+      if (isInt && hasNaN)
+        throw new Error("INTEGER_REQUIRED");
+      if (this.state.rows[key]) {
+        where[key] = val;
+      }
+    }
+    if (_lang)
+      this.state.lang = _lang;
+    if (this.dbTables?.id?.data_type === "integer" && Number.isNaN(+id)) {
       throw new Error("INTEGER_REQUIRED");
-    const rows = this.getTableRows(c);
+    }
+    this.where({ ...where, [`${this.table}.id`]: id }, db, { trusted: true });
+    if (this.defaultWhereRaw) {
+      const whereStr = this.defaultWhereRaw;
+      this.state.res.andWhere(function() {
+        this.whereRaw(whereStr);
+      });
+    }
+    this.checkDeleted();
+    this.fields({ c, _fields, _join, db });
+    const result = await this.state.res.first();
+    this.deleteHiddenFieldsFromResult(result, this.getHiddenFields());
+    c.set("result", result);
+    c.set("relationsData", this.relations);
+  }
+  async add(c) {
+    this.initState(c);
+    const body = await c.req.json();
+    const data = this.updateIncomingData(c, body);
+    const validatedData = Array.isArray(data) ? data.map((item) => this.validateIntegerFields(item)) : this.validateIntegerFields(data);
+    const result = await this.getDbWithSchema(c.env.dbWrite).insert(validatedData).returning("*");
+    c.set("result", result[0]);
+    c.set("relationsData", this.relations);
+  }
+  validateIntegerFields(data) {
+    for (const key of Object.keys(data)) {
+      const isInt = this.dbTables?.[key]?.data_type === "integer";
+      const hasNaN = [].concat(data[key]).find((item) => item && Number.isNaN(+item));
+      if (isInt && hasNaN)
+        throw new Error("INTEGER_REQUIRED");
+      data[key] = data[key] ?? null;
+    }
+    return data;
+  }
+  async update(c) {
+    this.initState(c);
+    const db = c.env.db;
+    const params = c.req.param();
+    const whereClause = { ...params };
+    if (this.dbTables?.id?.data_type === "integer" && Number.isNaN(+String(whereClause.id))) {
+      throw new Error("INTEGER_REQUIRED");
+    }
+    const rows = this.state.rows;
     if (rows.isDeleted)
-      where.isDeleted = false;
-    const t = this.getDbWithSchema(c.env.dbWrite).where(where);
+      whereClause.isDeleted = false;
+    const rawData = await c.req.json();
+    const data = this.filterDataByTableColumns(rawData, rows);
+    if (Object.keys(data).length) {
+      if (rows.timeUpdated)
+        data.timeUpdated = db.fn.now();
+      await this.getDbWithSchema(c.env.dbWrite).update(data).where(whereClause);
+    }
+    await this.getById(c);
+  }
+  async delete(c) {
+    this.initState(c);
+    const whereClause = { ...c.req.param() };
+    if (this.dbTables?.id?.data_type === "integer" && Number.isNaN(+String(whereClause.id))) {
+      throw new Error("INTEGER_REQUIRED");
+    }
+    const rows = this.state.rows;
+    if (rows.isDeleted)
+      whereClause.isDeleted = false;
+    const t = this.getDbWithSchema(c.env.dbWrite).where(whereClause);
     const result = rows.isDeleted ? await t.update({ isDeleted: true }) : await t.delete();
     c.set("result", { ok: true });
     c.set("meta", { countDeleted: result });
@@ -785,9 +763,8 @@ class Routings {
   routesEmailTemplates = {};
   migrationDirs;
   constructor(options) {
-    const { migrationDirs } = options || {};
-    if (migrationDirs)
-      this.migrationDirs = migrationDirs;
+    if (options?.migrationDirs)
+      this.migrationDirs = options.migrationDirs;
   }
   pushToRoutes({ method, path, fnArr }) {
     for (const fn of fnArr) {
@@ -817,51 +794,52 @@ class Routings {
     this.pushToRoutes({ path: "*", fnArr });
   }
   crud(params) {
-    const { table, prefix, permissions } = params;
+    const { prefix, table, permissions } = params;
     const p = `/${prefix || table}`.replace(/^\/+/, "/");
     this.get(`${p}`, async (c) => {
-      const crudBuilder = new CrudBuilder(params);
-      await crudBuilder.get(c);
+      const cb = new CrudBuilder(params);
+      await cb.get(c);
     });
     this.post(`${p}`, async (c) => {
-      const crudBuilder = new CrudBuilder(params);
-      await crudBuilder.add(c);
+      const cb = new CrudBuilder(params);
+      await cb.add(c);
     });
     this.get(`${p}/:id`, async (c) => {
-      const crudBuilder = new CrudBuilder(params);
-      await crudBuilder.getById(c);
+      const cb = new CrudBuilder(params);
+      await cb.getById(c);
     });
     this.put(`${p}/:id`, async (c) => {
-      const crudBuilder = new CrudBuilder(params);
-      await crudBuilder.update(c);
+      const cb = new CrudBuilder(params);
+      await cb.update(c);
     });
     this.patch(`${p}/:id`, async (c) => {
-      const crudBuilder = new CrudBuilder(params);
-      await crudBuilder.update(c);
+      const cb = new CrudBuilder(params);
+      await cb.update(c);
     });
     this.delete(`${p}/:id`, async (c) => {
-      const crudBuilder = new CrudBuilder(params);
-      await crudBuilder.delete(c);
+      const cb = new CrudBuilder(params);
+      await cb.delete(c);
     });
     if (permissions?.protectedMethods) {
-      const updteRoutesPermissions = (path, method) => {
+      const register = (path, method) => {
         const key = `${method} ${path}`;
-        if (!this.routesPermissions[`${key}`])
-          this.routesPermissions[`${key}`] = [];
-        this.routesPermissions[`${key}`].push(`${p.replace(/^\//, "")}.${method.toLowerCase()}`);
+        if (!this.routesPermissions[key])
+          this.routesPermissions[key] = [];
+        this.routesPermissions[key].push(`${p.replace(/^\//, "")}.${method.toLowerCase()}`);
       };
-      const methods = permissions?.protectedMethods?.[0] === "*" ? ["GET", "POST", "PUT", "PATCH", "DELETE"] : permissions?.protectedMethods;
+      const methods = permissions.protectedMethods[0] === "*" ? ["GET", "POST", "PUT", "PATCH", "DELETE"] : permissions.protectedMethods;
       for (const method of methods) {
         if (method === "POST" || method === "GET")
-          updteRoutesPermissions(`${p}`, method);
+          register(p, method);
         if (method !== "POST")
-          updteRoutesPermissions(`${p}/:id`, method);
+          register(`${p}/:id`, method);
       }
     }
   }
   errors(err) {
     const errArr = Array.isArray(err) ? err : [err];
-    errArr.map((e) => this.routesErrors = { ...this.routesErrors, ...e });
+    for (const e of errArr)
+      this.routesErrors = { ...this.routesErrors, ...e };
   }
   emailTemplates(template) {
     this.routesEmailTemplates = { ...this.routesEmailTemplates, ...template };

@@ -1,9 +1,24 @@
 import flattening from 'flattening';
-import type { CrudBuilderOptionsType, CrudBuilderPermissionsType, DbTablesType, MethodsType, getResultType, metaType, stringRecordType, whereParamsType } from "./types";
-import type { Context } from 'hono';
+import type {
+  ActionFlags,
+  AccessRecord,
+  AppContext,
+  ColumnInfoMap,
+  CrudAction,
+  CrudBuilderJoinType,
+  CrudBuilderOptionsType,
+  FieldRecord,
+  HiddenFieldsResult,
+  RequestState,
+  StringRecord,
+  UserType,
+  WhereParams,
+  getResultType,
+  metaType,
+} from './types';
 import type { Knex } from 'knex';
 
-const getPositiveIntFromEnv = (name: 'LIMIT_DEFAULT' | 'LIMIT_MAX') => {
+const getPositiveIntFromEnv = (name: 'LIMIT_DEFAULT' | 'LIMIT_MAX'): number | undefined => {
   const value = process.env[name];
   if (!value) return;
   const parsed = Number(value);
@@ -15,9 +30,9 @@ const getQueryLimit = ({
   _limit,
   _unlimited,
 }: {
-  _limit?: any;
-  _unlimited?: any;
-}) => {
+  _limit?: string | number;
+  _unlimited?: string | boolean;
+}): number | undefined => {
   const canGetUnlimited = process.env.CAN_GET_UNLIMITED === 'true';
   const isUnlimited = canGetUnlimited && (_unlimited === 'true' || _unlimited === true);
   if (isUnlimited) return;
@@ -25,297 +40,331 @@ const getQueryLimit = ({
   const defaultLimit = getPositiveIntFromEnv('LIMIT_DEFAULT');
   const maxLimit = getPositiveIntFromEnv('LIMIT_MAX');
 
-  let limit: any = _limit;
-  if ((typeof limit === 'undefined' || limit === null || limit === '') && typeof defaultLimit !== 'undefined') {
-    limit = defaultLimit;
-  }
+  let limit: number | undefined = _limit != null && _limit !== '' ? +_limit : defaultLimit;
+  if (!limit || Number.isNaN(limit)) return;
 
-  if (!limit) return;
-
-  const limitNumber = +limit;
-  if (typeof maxLimit !== 'undefined' && !Number.isNaN(limitNumber) && limitNumber > maxLimit) {
-    return maxLimit;
-  }
-
+  if (maxLimit && limit > maxLimit) return maxLimit;
   return limit;
 };
 
-export default class CrudBuilder {
-  c?: Context;
-  table: any;
-  schema: any;
-  aliases: stringRecordType;
-  join: any;
-  joinOnDemand: any;
-  leftJoin: any;
-  leftJoinDistinct: any;
-  lang: any;
-  translate: any;
-  searchFields: any;
+// FIX: positive integer validation
+const toPositiveInt = (value: unknown, fallback: number): number => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < fallback) return fallback;
+  return Math.floor(n);
+};
 
-  requiredFields: any;
-  defaultWhere: any;
-  defaultWhereRaw: any;
-  defaultSort: any;
-  sortRaw: any;
-  fieldsRaw: any;
-  tokenRequired: any;
-  ownerRequired: any;
-  rootRequired: any;
-  access: any;
-  accessByStatuses: any;
-  deletedReplacements: any;
-  includeDeleted: boolean;
+// -- FIX: action array -> flags helper ---------------------
 
-  hiddenFields?: string[];
-  readOnlyFields?: string[];
-  permissionViewableFields?: Record<string, string[]>;
-  permissionEditableFields?: Record<string, string[]>;
-  showFieldsByPermission?: Record<string, string[]>;
-  permissionCheckedMethods?: (MethodsType | '*')[];
-  replacedOwnerPermissions?: string[];
+const toActionFlags = (input?: CrudAction[]): ActionFlags =>
+  (input || []).reduce<ActionFlags>((acc, cur) => ({ ...acc, [cur]: true }), {});
 
-  cache: any;
-  userIdFieldName: any;
-  additionalFields: any;
-  apiClientMethodNames: any;
+// -- Class --------------------------------------------------
 
-  dbTables: DbTablesType;
-  coaliseWhere: any;
-  langJoin: any = {};
-  coaliseWhereReplacements: any;
-  user?: any;
-  res: any;
-  isOwner?: boolean;
-  rows: any;
-  relations?: Record<string, CrudBuilderOptionsType>;
-  roles: any;
-  permissions?: CrudBuilderPermissionsType;
-  ownerPermissions: Record<string, boolean>;
+export default class CrudBuilder<T extends Record<string, unknown> = Record<string, unknown>> {
 
-  constructor({
-    c,
-    table,
-    schema,
-    aliases,
-    join,
-    joinOnDemand,
-    leftJoin,
-    leftJoinDistinct,
-    lang,
-    translate,
-    searchFields,
-    hiddenFields,
-    readOnlyFields,
-    permissions,
-    requiredFields,
-    defaultWhere,
-    defaultWhereRaw,
-    defaultSort,
-    sortRaw,
-    fieldsRaw,
-    tokenRequired,
-    ownerRequired,
-    rootRequired,
-    access,
-    accessByStatuses,
-    dbTables,
-    deletedReplacements,
-    includeDeleted,
-    cache,
-    userIdFieldName,
-    additionalFields,
-    apiClientMethodNames,
-    relations,
-  }: CrudBuilderOptionsType) {
-    this.c = c;
-    this.table = table;
-    this.schema = schema || 'public';
-    this.aliases = aliases || {};
-    this.join = join || [];
-    this.joinOnDemand = joinOnDemand || [];
-    this.leftJoin = leftJoin || [];
-    this.leftJoinDistinct = !!leftJoinDistinct;
-    this.lang = lang || 'en';
-    this.translate = translate || [];
-    this.showFieldsByPermission = permissions?.fields?.viewable || {};
-    this.ownerPermissions = permissions?.owner?.reduce((acc, cur) => ({ ...acc, [cur]: true }) ,{}) || {};
-    this.readOnlyFields = readOnlyFields || ['id', 'timeCreated', 'timeUpdated', 'timeDeleted', 'isDeleted'];
-    this.requiredFields = requiredFields || {};
-    this.defaultWhere = defaultWhere || {};
-    this.defaultWhereRaw = defaultWhereRaw;
-    this.defaultSort = defaultSort;
-    this.sortRaw = sortRaw;
-    this.fieldsRaw = fieldsRaw;
-    this.tokenRequired = tokenRequired?.reduce((acc: any, cur: any) => ({ ...acc, [cur]: true }), {}) || {};
-    this.ownerRequired = ownerRequired?.reduce((acc: any, cur: any) => ({ ...acc, [cur]: true }), {}) || {};
-    this.rootRequired = rootRequired?.reduce((acc: any, cur: any) => ({ ...acc, [cur]: true }), {}) || {};
-    this.access = access || {};
-    this.accessByStatuses = accessByStatuses || {};
-    this.searchFields = searchFields || [];
-    this.dbTables = dbTables || {};
-    this.deletedReplacements = deletedReplacements;
-    this.includeDeleted = typeof includeDeleted === 'boolean' ? includeDeleted : !!this.deletedReplacements;
-    this.hiddenFields = hiddenFields || [];
-    this.coaliseWhere = {};
-    this.coaliseWhereReplacements = {};
-    this.cache = cache;
-    this.userIdFieldName = userIdFieldName || 'userId';
-    this.additionalFields = additionalFields || {};
-    this.apiClientMethodNames = apiClientMethodNames || {};
-    this.relations = relations;
+  // -- FIX: all config properties are `readonly` -----------
+  readonly table: string;
+  readonly schema: string;
+  readonly aliases: StringRecord;
+  readonly join: CrudBuilderJoinType[];
+  readonly joinOnDemand: CrudBuilderJoinType[];
+  readonly leftJoinConfig: [string, string, string][];
+  readonly leftJoinDistinct: boolean;
+  readonly defaultLang: string;
+  readonly translate: string[];
+  readonly searchFields: string[];
+  readonly requiredFields: Record<string, string>;
+  readonly defaultWhere: FieldRecord;
+  readonly defaultWhereRaw: string | undefined;
+  readonly defaultSort: string | undefined;
+  readonly sortRaw: string | undefined;
+  readonly fieldsRaw: string[] | undefined;
+  readonly tokenRequired: ActionFlags;
+  readonly ownerRequired: ActionFlags;
+  readonly rootRequired: ActionFlags;
+  readonly access: AccessRecord;
+  readonly accessByStatuses: AccessRecord;
+  readonly deletedReplacements: FieldRecord | undefined;
+  readonly includeDeleted: boolean;
+  readonly hiddenFields: string[];
+  readonly readOnlyFields: string[];
+  readonly showFieldsByPermission: Record<string, string[]>;
+  readonly ownerPermissions: Record<string, boolean>;
+  readonly dbTables: ColumnInfoMap;
+  readonly cache: { ttl?: number } | undefined;
+  readonly userIdFieldName: string;
+  readonly additionalFields: Partial<Record<string, Record<string, unknown>>>;
+  readonly apiClientMethodNames: StringRecord;
+  readonly relations: Record<string, CrudBuilderOptionsType> | undefined;
+
+  // -- FIX: per-request mutable state as single object -----
+  private state!: RequestState;
+
+  constructor(options: CrudBuilderOptionsType<T>) {
+    this.table = options.table;
+    this.schema = options.schema || 'public';
+    this.aliases = options.aliases || {};
+    this.join = options.join || [];
+    this.joinOnDemand = options.joinOnDemand || [];
+    this.leftJoinConfig = options.leftJoin || [];
+    this.leftJoinDistinct = !!options.leftJoinDistinct;
+    this.defaultLang = options.lang || 'en';
+    this.translate = options.translate || [];
+    this.searchFields = options.searchFields || [];
+    this.requiredFields = options.requiredFields || {};
+    this.defaultWhere = options.defaultWhere || {};
+    this.defaultWhereRaw = options.defaultWhereRaw;
+    this.defaultSort = options.defaultSort;
+    this.sortRaw = options.sortRaw;
+    this.fieldsRaw = options.fieldsRaw;
+    this.tokenRequired = toActionFlags(options.tokenRequired);
+    this.ownerRequired = toActionFlags(options.ownerRequired);
+    this.rootRequired = toActionFlags(options.rootRequired);
+    this.access = options.access || {};
+    this.accessByStatuses = options.accessByStatuses || {};
+    this.deletedReplacements = options.deletedReplacements;
+    this.includeDeleted = typeof options.includeDeleted === 'boolean'
+      ? options.includeDeleted
+      : !!options.deletedReplacements;
+    this.hiddenFields = options.hiddenFields || [];
+    this.readOnlyFields = options.readOnlyFields || ['id', 'timeCreated', 'timeUpdated', 'timeDeleted', 'isDeleted'];
+    this.showFieldsByPermission = options.permissions?.fields?.viewable || {};
+    this.ownerPermissions = options.permissions?.owner?.reduce<Record<string, boolean>>(
+      (acc, cur) => ({ ...acc, [cur]: true }),
+      {},
+    ) || {};
+    this.dbTables = options.dbTables || {};
+    this.cache = options.cache;
+    this.userIdFieldName = options.userIdFieldName || 'userId';
+    this.additionalFields = options.additionalFields || {};
+    this.apiClientMethodNames = options.apiClientMethodNames || {};
+    this.relations = options.relations;
   }
 
-  getDbWithSchema(db: Knex<any, unknown[]>) {
-    const result = db(this.table);
-    if (this.schema) result.withSchema(this.schema);
-    return result;
+  // -- State management ------------------------------------
+
+  private initState(c: AppContext): void {
+    const env = c.env;
+    this.state = {
+      res: this.getDbWithSchema(env.db),
+      rows: env.dbTables?.[`${this.schema}.${this.table}`] || {},
+      user: c.var?.user as UserType | undefined,
+      roles: env.roles,
+      lang: this.defaultLang,
+      coalesceWhere: {},
+      coalesceWhereReplacements: {},
+      langJoin: {},
+    };
   }
 
-  getTableRows(c: Context) {
-    return c.env.dbTables[`${this.schema}.${this.table}`] || {};
+  // -- DB helpers ------------------------------------------
+
+  private getDbWithSchema(db: Knex): Knex.QueryBuilder {
+    const qb = db(this.table);
+    if (this.schema) qb.withSchema(this.schema);
+    return qb;
   }
 
-  sort(sort: any, db: any) {
-    if (this.sortRaw) this.res.orderByRaw(this.sortRaw);
+  // -- FIX: SQL Injection - validate sort fields -----------
 
-    const _sort = sort || this.defaultSort;
+  private getKnownColumnNames(): Set<string> {
+    const names = new Set<string>();
+    for (const col of Object.keys(this.state.rows)) names.add(col);
+    for (const col of Object.keys(this.aliases)) names.add(col);
+    for (const j of this.join) names.add(j.alias || j.table);
+    for (const j of this.joinOnDemand) names.add(j.alias || j.table);
+    return names;
+  }
+
+  private isValidSortField(field: string): boolean {
+    const name = field.replace(/^-/, '');
+    if (/^random\(\)$/i.test(name)) return true;
+    return this.getKnownColumnNames().has(name);
+  }
+
+  // -- FIX: validate WHERE keys against known columns ------
+
+  private isValidWhereKey(key: string): boolean {
+    const cleanKey = key
+      .replace(/^(_null_|_not_null_|_in_|_not_in_|_from_|_to_)/, '')
+      .replace(/[!~]$/, '');
+    if (this.state.rows[cleanKey]) return true;
+    if (cleanKey.includes('.')) {
+      const col = cleanKey.split('.').pop() || '';
+      return !!this.state.rows[col];
+    }
+    if (this.state.coalesceWhere[cleanKey]) return true;
+    if (this.state.langJoin[cleanKey]) return true;
+    return false;
+  }
+
+  // -- Sort -------------------------------------------------
+
+  private sort(sortParam: string | undefined, db: Knex): void {
+    if (this.sortRaw) this.state.res.orderByRaw(this.sortRaw);
+
+    const _sort = sortParam || this.defaultSort;
     if (!_sort) return;
 
-    _sort.split(',').forEach((item: any) => {
-      if (item.match(/^random\(\)$/i)) return this.res.orderBy(db.raw('RANDOM()'));
+    for (const item of _sort.split(',')) {
+      if (/^random\(\)$/i.test(item)) {
+        this.state.res.orderBy(db.raw('RANDOM()') as unknown as string);
+        continue;
+      }
 
-      const match = item.match(/^(-)?(.*)$/);
-      this.res.orderBy(match[2], match[1] && 'desc', 'last');
-    });
-  }
+      // FIX: validate sort field against known columns
+      if (!this.isValidSortField(item)) continue;
 
-  pagination({
-    _page, _skip = 0, _limit, _unlimited,
-  }: any) {
-
-    const limit = getQueryLimit({ _limit, _unlimited });
-    if (!limit) return;
-
-    this.res.limit(limit);
-    const offset = _page ? (_page - 1) * limit : 0;
-    this.res.offset(offset + (+_skip));
-  }
-
-  whereNotIn(whereNotInObj: any) {
-    if (!whereNotInObj) return;
-
-    for (const [key, value] of Object.entries(whereNotInObj)) {
-      this.res.whereNotIn(key, value);
+      const match = item.match(/^(-)?(.+)$/);
+      if (!match) continue;
+      this.state.res.orderBy(match[2], match[1] ? 'desc' : 'asc', 'last');
     }
   }
 
-  where(whereObj: any, db: any) {
+  // -- Pagination ------------------------------------------
+
+  private pagination({
+    _page,
+    _skip = 0,
+    _limit,
+    _unlimited,
+  }: {
+    _page?: string | number;
+    _skip?: string | number;
+    _limit?: string | number;
+    _unlimited?: string | boolean;
+  }): void {
+    const limit = getQueryLimit({ _limit, _unlimited });
+    if (!limit) return;
+
+    this.state.res.limit(limit);
+
+    // FIX: validate page and skip as positive integers
+    const page = toPositiveInt(_page, 1);
+    const skip = toPositiveInt(_skip, 0);
+    const offset = (page - 1) * limit + skip;
+    this.state.res.offset(offset);
+  }
+
+  // -- Where -----------------------------------------------
+
+  private where(
+    whereObj: Record<string, unknown>,
+    db: Knex,
+    options?: { trusted?: boolean },
+  ): void {
     if (!whereObj) return;
+    const { trusted = false } = options || {};
 
     for (const [key, value] of Object.entries(whereObj)) {
-      if (this.langJoin[`${key}`]) {
-        this.res.whereRaw(`${this.langJoin[`${key}`]} = :_value`, { _value: value, lang: this.lang });
-      } else if (this.coaliseWhere[`${key}`] || this.coaliseWhere[`${key.replace(/!$/, '')}`]) {
+      // FIX: skip unknown columns from untrusted input
+      if (!trusted && !this.isValidWhereKey(key)) continue;
+
+      if (this.state.langJoin[key]) {
+        this.state.res.whereRaw(
+          `${this.state.langJoin[key]} = :_value`,
+          { _value: value, lang: this.state.lang },
+        );
+      } else if (this.state.coalesceWhere[key] || this.state.coalesceWhere[key.replace(/!$/, '')]) {
         const key2 = key.replace(/!$/, '');
-        const isNnot = key.match(/!$/) ? 'NOT' : '';
-        const coaliseWhere = this.coaliseWhere[`${key2}`];
-        const replacements = this.coaliseWhereReplacements;
+        const isNot = key.endsWith('!') ? 'NOT' : '';
+        const coalesceWhere = this.state.coalesceWhere[key2];
+        const replacements = this.state.coalesceWhereReplacements;
         if (Array.isArray(value)) {
           for (const _value of value) {
-            this.res.orWhere(function (this: Knex.QueryBuilder) {
-              this.whereRaw(`${isNnot} ${coaliseWhere} = :_value`, { ...replacements, _value });
+            this.state.res.orWhere(function (this: Knex.QueryBuilder) {
+              this.whereRaw(`${isNot} ${coalesceWhere} = :_value`, { ...replacements, _value });
             });
           }
         } else {
-          this.res.whereRaw(`${isNnot} ${coaliseWhere} = :_value`, { ...replacements, _value: value });
+          this.state.res.whereRaw(
+            `${isNot} ${coalesceWhere} = :_value`,
+            { ...replacements, _value: value },
+          );
         }
-      } else if (key.match(/~$/)) {
-        // iLike
-        this.res.where(key.replace(/~$/, ''), 'ilike', value);
-      } else if (key.match(/!$/)) {
+      } else if (key.endsWith('~')) {
+        this.state.res.where(key.replace(/~$/, ''), 'ilike', value as string);
+      } else if (key.endsWith('!')) {
+        const col = key.replace(/!$/, '');
         if (Array.isArray(value)) {
-          this.res.whereNotIn(key.replace(/!$/, ''), value);
+          this.state.res.whereNotIn(col, value);
         } else {
-          this.res.whereNot(key.replace(/!$/, ''), value);
+          this.state.res.whereNot(col, value as string);
         }
-      } else if (key.match(/^_null_/)) {
+      } else if (key.startsWith('_null_')) {
         const m = key.match(/^_null_(.+)$/);
-        this.res.whereNull(m?.[1]);
-      } else if (key.match(/^_in_/)) {
+        if (m) this.state.res.whereNull(m[1]);
+      } else if (key.startsWith('_in_')) {
         try {
           const m = key.match(/^_in_(.+)$/);
-          this.res.whereIn(m?.[1], JSON.parse(value as any));
+          if (m) this.state.res.whereIn(m[1], JSON.parse(value as string));
         } catch {
-          throw new Error('ERROR_QUERY_VALUE')
+          throw new Error('ERROR_QUERY_VALUE');
         }
-      } else if (key.match(/^_not_in_/)) {
+      } else if (key.startsWith('_not_in_')) {
         try {
           const m = key.match(/^_not_in_(.+)$/);
-          this.res.whereNotIn(m?.[1], JSON.parse(value as any));
+          if (m) this.state.res.whereNotIn(m[1], JSON.parse(value as string));
         } catch {
-          throw new Error('ERROR_QUERY_VALUE')
+          throw new Error('ERROR_QUERY_VALUE');
         }
-      } else if (key.match(/^_not_null_/)) {
+      } else if (key.startsWith('_not_null_')) {
         const m = key.match(/^_not_null_(.+)$/);
-        this.res.whereNotNull(m?.[1]);
-      } else if (key.match(/_(from|to)_/)) {
+        if (m) this.state.res.whereNotNull(m[1]);
+      } else if (/_(?:from|to)_/.test(key)) {
         if (value !== '') {
           const m = key.match(/_(from|to)_(.+)$/);
-          const sign = m?.[1] === 'from' ? '>=' : '<=';
-
-          const coaliseWhere = this.coaliseWhere[`${m?.[2]}`];
-          if (coaliseWhere) {
-            this.res.whereRaw(`${coaliseWhere} ${sign} ?`, [value]);
+          if (!m) continue;
+          const sign = m[1] === 'from' ? '>=' : '<=';
+          const coalesceWhere = this.state.coalesceWhere[m[2]];
+          if (coalesceWhere) {
+            this.state.res.whereRaw(`${coalesceWhere} ${sign} ?`, [value]);
           } else {
-            this.res.where(`${m?.[2]}`, sign, value);
+            this.state.res.where(m[2], sign, value as string);
           }
         }
       } else if (Array.isArray(value)) {
-        this.res.whereIn(key, value);
+        this.state.res.whereIn(key, value);
       } else if (value === null) {
-        this.res.whereNull(key);
-      } else if (this.leftJoin && !key.includes('.')) {
-        this.res.where({ [`${this.table}.${key}`]: value });
+        this.state.res.whereNull(key);
+      } else if (this.leftJoinConfig.length && !key.includes('.')) {
+        this.state.res.where({ [`${this.table}.${key}`]: value });
       } else {
-        this.res.where(key, value);
+        this.state.res.where(key, value as string);
       }
     }
   }
 
-  getHiddenFields() {
-    if (!this.roles) return { regular: this.hiddenFields, owner: this.hiddenFields };
+  // -- Fields / Joins --------------------------------------
 
-    const permissions = this.roles.getPermissions(this.user?.roles);
+  private fields({
+    c,
+    _fields,
+    _join,
+    db,
+    _sort,
+  }: {
+    c: AppContext;
+    _fields?: string;
+    _join?: string | string[];
+    db: Knex;
+    _sort?: string;
+  }): void {
+    let f = _fields?.split(',').filter((item) => item !== '-relations');
 
-    let toShow: string[] = [];
-    let ownerToShow: string[] = [];
-    for (const [key, value] of Object.entries(this.showFieldsByPermission)) {
-      const hasPermission = this.roles.checkWildcardPermissions({ key, permissions });
-      if (hasPermission) toShow = toShow.concat(value);
-      
-      const ownerHasPermission = this.roles.checkWildcardPermissions({ key, permissions: this.ownerPermissions });
-      if (ownerHasPermission) ownerToShow = ownerToShow.concat(value);
-    }
-
-    const regular = this.hiddenFields?.filter((item) => !toShow.includes(item)) || [];
-    const owner = this.hiddenFields?.filter((item) => !ownerToShow.includes(item)) || [];
-
-    return { regular, owner };
-  }
-
-  fields({
-    c, _fields, _join, db, _sort,
-  }: any) {
-    // this.updatehiddenFields(this.hiddenFields);
-    let f = _fields && _fields.split(',').filter((item) => item !== '-relations');
-
-    if (this.leftJoin.length) {
-      this.leftJoin.map((item: any) => this.res.leftJoin(...item));
+    if (this.leftJoinConfig.length) {
+      for (const item of this.leftJoinConfig) this.state.res.leftJoin(...item);
 
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || '').replace(/(^|,)-/g, ',').split(',').filter(Boolean);
-        this.res.distinct(!f ? [] : sortArr.map((item: any) => !f.includes(item) && `${this.table}.${item}`).filter(Boolean));
+        this.state.res.distinct(
+          !f
+            ? []
+            : sortArr
+                .map((item) => !f.includes(item) && `${this.table}.${item}`)
+                .filter(Boolean),
+        );
       }
     }
 
@@ -324,168 +373,263 @@ export default class CrudBuilder {
     if (_join) {
       const joinNames = Array.isArray(_join) ? _join : _join.split(',');
       for (const joinName of joinNames) {
-        const toJoin = this.joinOnDemand.filter(({ table, alias }: any) => joinName === alias || joinName === table );
-        if (toJoin.length) join = join.concat(toJoin.filter((j: any) => !join.find(({ table, alias }) => table === j.table && alias === j.alias)));
+        const toJoin = this.joinOnDemand.filter(
+          ({ table, alias }) => joinName === alias || joinName === table,
+        );
+        if (toJoin.length) {
+          join = join.concat(
+            toJoin.filter((j) => !join.find(({ table, alias }) => table === j.table && alias === j.alias)),
+          );
+        }
       }
     }
 
     if (f) {
-      join = join.filter(({ table, alias }: any) => f.includes(table) || f.includes(alias));
-      f = f.filter((name: string) => !join.find(({ table, alias}: any) => name === table || name === alias));
+      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
+      f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
 
-    let joinCoaleise = (f || Object.keys(this.rows))
-      // .filter((name: any) => !this.hiddenFields.includes(name))
-      .map((l: any) => `${this.table}.${l}`);
+    let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);
 
-    if (this.includeDeleted && this.deletedReplacements && this.rows.isDeleted) {
-      joinCoaleise = joinCoaleise.map((item: any) => {
+    if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
+      joinCoalesce = joinCoalesce.map((item) => {
         const [tableName, fieldName] = item.split('.');
-        const replaceWith = this.deletedReplacements[`${fieldName}`];
+        const replaceWith = this.deletedReplacements?.[fieldName];
         if (typeof replaceWith === 'undefined') return item;
-        return db.raw(`CASE WHEN "${this.table}"."isDeleted" THEN :replaceWith ELSE "${tableName}"."${fieldName}" END AS ${fieldName}`, { replaceWith });
+        return db.raw(
+          `CASE WHEN "${this.table}"."isDeleted" THEN :replaceWith ELSE "${tableName}"."${fieldName}" END AS ${fieldName}`,
+          { replaceWith },
+        ) as unknown as string;
       });
     }
 
     for (const field of Object.keys(this.aliases)) {
-      joinCoaleise.push(`${this.table}.${field} AS ${this.aliases[`${field}`]}`);
+      joinCoalesce.push(`${this.table}.${field} AS ${this.aliases[field]}`);
     }
 
-    if (this.lang && this.lang !== 'en') {
+    if (this.state.lang && this.state.lang !== 'en') {
       for (const field of this.translate) {
-        this.langJoin[`${field}`] = `COALESCE( (
+        this.state.langJoin[field] = `COALESCE( (
           select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}" 
+            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
-        joinCoaleise.push(db.raw(this.langJoin[`${field}`] + `AS "${field}"`, { lang: this.lang }));
+        joinCoalesce.push(
+          db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }) as unknown as string,
+        );
       }
     }
 
     for (const {
-      table, schema, as, where, whereBindings, alias, defaultValue, fields,
-      field, limit, orderBy, byIndex, leftJoin,
+      table,
+      schema,
+      as,
+      where: joinWhere,
+      whereBindings,
+      alias,
+      defaultValue,
+      fields: joinFields,
+      field,
+      limit,
+      orderBy,
+      byIndex,
+      leftJoin,
     } of join) {
       if (!table && field) {
-        joinCoaleise.push(db.raw(`${field} AS ${alias || field}`));
+        joinCoalesce.push(db.raw(`${field} AS ${alias || field}`) as unknown as string);
         continue;
       }
 
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : '';
       const limitStr = limit ? `LIMIT ${limit}` : '';
-      const lang = table === 'lang' && this.lang && this.lang.match(/^\w{2}$/) ? `AND lang='${this.lang}'` : '';
-      const ff = fields?.map((item: any) => (typeof item === 'string'
-        ? `'${item}', "${as || table}"."${item}"`
-        : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`));
+      const lang = table === 'lang' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
+      const ff = joinFields?.map((item) =>
+        typeof item === 'string'
+          ? `'${item}', "${as || table}"."${item}"`
+          : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`,
+      );
       const f2 = ff ? `json_build_object(${ff.join(', ')})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
-      const wb: any = {};
-      if (whereBindings) {
-        if (!c) continue;
-        const envAll = c.env;
-        const query = c.req.query();
-        const params = c.req.param();
-    
-        const env = { ...envAll };
-        [
-          'db',
-          'dbWrite',
-          'dbTables',
-          'error',
-          'getErrorByMessage',
-          'log',
-        ].map((key) => delete env[`${key}`]);
+      const wb: Record<string, unknown> = {};
 
-        const dd: any = flattening({ env, params, query });
-        for (const [k, v] of Object.entries(whereBindings)) wb[`${k}`] = dd[`${v}`] || null;
+      if (whereBindings) {
+        const envAll = { ...c.env } as Record<string, unknown>;
+        ['db', 'dbWrite', 'dbTables', 'error', 'getErrorByMessage', 'log']
+          .forEach((key) => delete envAll[key]);
+
+        const dd: Record<string, unknown> = flattening({
+          env: envAll,
+          params: c.req.param(),
+          query: c.req.query(),
+        }) as Record<string, unknown>;
+        for (const [k, v] of Object.entries(whereBindings)) {
+          wb[k] = dd[v] ?? null;
+        }
       }
 
-      const leftJoinStr = !leftJoin ? ''
-        : typeof leftJoin === 'string' ? `LEFT JOIN ${leftJoin}`
+      const leftJoinStr = !leftJoin
+        ? ''
+        : typeof leftJoin === 'string'
+          ? `LEFT JOIN ${leftJoin}`
           : `LEFT JOIN "${leftJoin[0]}" ON ${leftJoin[1]} = ${leftJoin[2]}`;
 
       const index = typeof byIndex === 'number' ? `[${byIndex}]` : '';
       const schemaStr = !schema ? '' : `"${schema}".`;
       const dValue = defaultValue ? `'${defaultValue}'` : 'NULL';
 
-      const coaliseWhere = `COALESCE( ( SELECT ${f3} FROM (
+      const coalesceWhere = `COALESCE( ( SELECT ${f3} FROM (
         SELECT * FROM ${schemaStr}"${table}" AS "${as || table}"
         ${leftJoinStr}
-        WHERE ${where} ${lang}
+        WHERE ${joinWhere} ${lang}
         ${orderByStr}
         ${limitStr}
       ) "${as || table}")${index}, ${dValue})`;
 
-      this.coaliseWhere = { ...this.coaliseWhere, [`${alias || table}`]: coaliseWhere };
-      this.coaliseWhereReplacements = { ...this.coaliseWhereReplacements, ...wb };
+      this.state.coalesceWhere[alias || table] = coalesceWhere;
+      this.state.coalesceWhereReplacements = {
+        ...this.state.coalesceWhereReplacements,
+        ...wb,
+      };
 
-      let sqlToJoin = `${coaliseWhere} AS "${alias || table}"`;
-      if (this.includeDeleted && this.deletedReplacements && this.rows.isDeleted) {
-        const replaceWith = this.deletedReplacements[`${table}`] || this.deletedReplacements[`${as}`] || this.deletedReplacements[`${alias}`];
+      let sqlToJoin = `${coalesceWhere} AS "${alias || table}"`;
+      if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
+        const replaceWith = this.deletedReplacements[table]
+          ?? (as ? this.deletedReplacements[as] : undefined)
+          ?? (alias ? this.deletedReplacements[alias] : undefined);
         if (typeof replaceWith !== 'undefined') {
-          sqlToJoin = `CASE WHEN "${this.table}"."isDeleted" THEN ${replaceWith} ELSE ${coaliseWhere} END AS "${alias || table}"`;
+          sqlToJoin = `CASE WHEN "${this.table}"."isDeleted" THEN ${replaceWith} ELSE ${coalesceWhere} END AS "${alias || table}"`;
         }
       }
 
-      joinCoaleise.push(db.raw(sqlToJoin, wb));
+      joinCoalesce.push(db.raw(sqlToJoin, wb) as unknown as string);
     }
 
     if (c.req.query()._search && this.searchFields.length) {
-      const searchColumnsStr = this.searchFields.map((name: any) => {
-        const searchName = this.langJoin[`${name}`] || `"${name}"`;
-        return `COALESCE(${searchName} <-> :_search, 1)`;
-        // return `COALESCE(${searchName} <-> :_search, 1) + COALESCE("${name}" <-> :_search, 1)`;
-      }).join(' + ');
-      joinCoaleise.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, {...c.req.query(), lang: this.lang }));
-      if (!_sort) this.res.orderBy('_search_distance', 'ASC');
+      const searchColumnsStr = this.searchFields
+        .map((name) => {
+          const searchName = this.state.langJoin[name] || `"${name}"`;
+          return `COALESCE(${searchName} <-> :_search, 1)`;
+        })
+        .join(' + ');
+      joinCoalesce.push(
+        db.raw(
+          `(${searchColumnsStr})/${this.searchFields.length} as _search_distance`,
+          { ...c.req.query(), lang: this.state.lang },
+        ) as unknown as string,
+      );
+      if (!_sort) this.state.res.orderBy('_search_distance', 'ASC');
     }
 
-    this.res.column(joinCoaleise.concat(this.fieldsRaw || []));
+    this.state.res.column(joinCoalesce.concat(this.fieldsRaw || []));
   }
 
-  checkDeleted() {
-    if (this.includeDeleted || !this.rows.isDeleted) return;
-    this.res.where({ [`${this.table}.isDeleted`]: false });
+  private checkDeleted(): void {
+    if (this.includeDeleted || !this.state.rows.isDeleted) return;
+    this.state.res.where({ [`${this.table}.isDeleted`]: false });
   }
 
-  getJoinFields() {
-    return this.join.reduce((acc: any, { alias, table, field }: any) => {
-      let type = !field && 'ARRAY';
-      if (!type) type = field.match(/::bool$/) && 'boolean';
-      if (!type) type = field.match(/::int$/) && 'integer';
-      if (!type) type = 'string';
-
+  private getJoinFields(): Record<string, string> {
+    return this.join.reduce<Record<string, string>>((acc, { alias, table, field }) => {
+      let type = !field
+        ? 'ARRAY'
+        : field.match(/::bool$/)
+          ? 'boolean'
+          : field.match(/::int$/)
+            ? 'integer'
+            : 'string';
       acc[alias || table] = type;
       return acc;
     }, {});
   }
 
-  deleteHiddenFieldsFromResult(result: any, hiddenFields: any) {
-    if (!hiddenFields) return;
+  private getHiddenFields(): HiddenFieldsResult {
+    if (!this.state.roles) {
+      return { regular: this.hiddenFields, owner: this.hiddenFields };
+    }
 
-    const isOwner = this.user?.id && result[`${this.userIdFieldName}`] === this.user?.id;
-    hiddenFields[isOwner ? 'owner' : 'regular'].map((key: string) => delete result[`${key}`]);
+    const permissions = this.state.roles.getPermissions(this.state.user?.roles);
+    let toShow: string[] = [];
+    let ownerToShow: string[] = [];
+
+    for (const [key, value] of Object.entries(this.showFieldsByPermission)) {
+      if (this.state.roles.checkWildcardPermissions({ key, permissions })) {
+        toShow = toShow.concat(value);
+      }
+      if (this.state.roles.checkWildcardPermissions({ key, permissions: this.ownerPermissions })) {
+        ownerToShow = ownerToShow.concat(value);
+      }
+    }
+
+    return {
+      regular: this.hiddenFields.filter((item) => !toShow.includes(item)),
+      owner: this.hiddenFields.filter((item) => !ownerToShow.includes(item)),
+    };
   }
 
-/** return data from table. Use '_fields', '_sort', '_start', '_limit' options
- * examples:
- * - second page, 1 record per page, sort by title desc, only id and title fields:
- *   /ships?_fields=id,title&_sort=-title&_page=2&_limit=1
- * - skip 100 records, get next 10 records: /ships?_skip=100&_limit=10
- * - search by id and title: /ships?_fields=title&id=2&title=second data
- * - search by multiply ids: /ships?_fields=id&id=1&id=3
- * - search where not: /ships?_fields=title&title!=_e%25 d_ta
- * - search by 'like' mask: /ships?_fields=title&title~=_e%25 d_ta
- * - search from-to: /ships?_from_year=2010&_to_year=2020
- */
+  private deleteHiddenFieldsFromResult(
+    result: Record<string, unknown> | undefined,
+    hiddenFields: HiddenFieldsResult,
+  ): void {
+    if (!result || !hiddenFields) return;
+    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const fields = hiddenFields[isOwner ? 'owner' : 'regular'];
+    for (const key of fields) delete result[key];
+  }
+
+  // -- FIX: data filtering shared by add + update ----------
+
+  private filterDataByTableColumns(
+    data: Record<string, unknown>,
+    rows: ColumnInfoMap,
+  ): Record<string, unknown> {
+    const filtered: Record<string, unknown> = {};
+    for (const key of Object.keys(data)) {
+      if (rows[key] && !this.readOnlyFields.includes(key)) {
+        filtered[key] = data[key];
+      }
+    }
+    return filtered;
+  }
+
+  private updateData(
+    c: AppContext,
+    data: Record<string, unknown>,
+  ): Record<string, unknown> {
+    for (const [key, errorCode] of Object.entries(this.requiredFields)) {
+      if (!data[key]) throw new Error(errorCode);
+    }
+
+    const rows = this.state.rows;
+
+    // FIX: removed `result = { ...c.req.param(), ...result }` - URL params must not merge into data
+    const filtered = this.filterDataByTableColumns(data, rows);
+
+    if (rows.userId && this.state.user) {
+      filtered.userId = this.state.user.id;
+    }
+
+    return filtered;
+  }
+
+  private updateIncomingData(
+    c: AppContext,
+    data: Record<string, unknown> | Record<string, unknown>[],
+  ): Record<string, unknown> | Record<string, unknown>[] {
+    return Array.isArray(data)
+      ? data.map((item) => this.updateData(c, item))
+      : this.updateData(c, data);
+  }
+
+  // -- Options (self-documenting) --------------------------
 
   optionsGet() {
-    const fields: any = {};
-    const fieldsSearchLike: any = {};
-    const fieldsFromTo: any = {};
-    const fieldsNull: any = {};
-    for (const [key, data] of Object.entries(this.dbTables || {})) {
+    const fields: Record<string, string> = {};
+    const fieldsSearchLike: Record<string, string> = {};
+    const fieldsFromTo: Record<string, string> = {};
+    const fieldsNull: Record<string, string> = {};
+
+    for (const [key, data] of Object.entries(this.dbTables)) {
       if (!data) continue;
-      fields[`${key}`] = data.data_type;
+      fields[key] = data.data_type;
       if (data.data_type === 'string') fieldsSearchLike[`${key}~`] = data.data_type;
       if (data.is_nullable === 'YES') {
         fieldsNull[`_null_${key}`] = 'string';
@@ -499,30 +643,6 @@ export default class CrudBuilder {
       }
     }
 
-    const queryParameters = {
-      ...fields,
-      ...fieldsSearchLike,
-      ...fieldsNull,
-      ...fieldsFromTo,
-      ...this.additionalFields?.get,
-      _fields: {
-        type: 'string',
-        example: 'id,name',
-      },
-      _sort: {
-        type: 'string',
-        example: '-timeCreated,name,random()',
-      },
-      _join: {
-        type: 'string',
-        example: 'table1,alias1',
-      },
-      _limit: 'integer',
-      _page: 'integer',
-      _skip: 'integer',
-      _lang: 'string',
-      ...(this.searchFields.length && { _search: 'string' }),
-    };
     return {
       tokenRequired: this.tokenRequired.get || this.access.read || this.accessByStatuses.read,
       ownerRequired: this.ownerRequired.get,
@@ -532,144 +652,23 @@ export default class CrudBuilder {
       joinOnDemand: this.joinOnDemand,
       accessByStatuses: this.accessByStatuses.read,
       additionalFields: this.additionalFields.get,
-      queryParameters,
+      queryParameters: {
+        ...fields,
+        ...fieldsSearchLike,
+        ...fieldsNull,
+        ...fieldsFromTo,
+        ...this.additionalFields?.get,
+        _fields: { type: 'string', example: 'id,name' },
+        _sort: { type: 'string', example: '-timeCreated,name,random()' },
+        _join: { type: 'string', example: 'table1,alias1' },
+        _limit: 'integer',
+        _page: 'integer',
+        _skip: 'integer',
+        _lang: 'string',
+        ...(this.searchFields.length && { _search: 'string' }),
+      },
       apiClientMethodNames: this.apiClientMethodNames,
     };
-  }
-
-  async get(c: Context) {
-    const { result, meta } = await this.getRequestResult(c);
-
-    c.set('meta', meta);
-    c.set('result', result);
-    c.set('relationsData', this.relations);
-  }
-
-  async getRequestResult(c: Context, q?: Record<string, string[]>): Promise<getResultType> {
-    const { db, roles } = c.env;
-    const { user } = c.var;
-
-    this.roles = roles;
-    this.user = user;
-
-    const queries = q || c.req.queries();
-    let queriesWithoutArrays: any = {};
-    for (const [queryName, queryValue] of Object.entries(queries)) {
-      queriesWithoutArrays[`${queryName}`] = queryValue?.length === 1 ? queryValue[0] : queryValue;
-    }
-
-    const {
-      _fields, _sort, _page, _skip, _limit, _unlimited, _after,
-      _lang, _search, _join, ...where
-    } = queriesWithoutArrays;
-
-    if (_lang) this.lang = _lang;
-    this.rows = this.getTableRows(c);
-    this.res = this.getDbWithSchema(c.env.db);
-
-    this.fields({ c, _fields, _join, db, _sort });
-
-    // Object.entries({ ...this.defaultWhere, ...where }).map(([cur, val]) => {
-    //   const isInt = this.dbTables?.[`${cur}`]?.data_type === 'integer';
-    //   const hasNaN = [].concat(val as never).find((item: any) => Number.isNaN(+item));
-    //   if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
-    // });
-
-    this.where({ ...this.defaultWhere, ...where }, db);
-
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr);
-      });
-    }
-
-    if (_search && this.searchFields.length) {
-      const whereStr = this.searchFields.map((name: string) => {
-        const searchName = this.langJoin[`${name}`] || `"${name}"`;
-        return `${searchName} % :_search`;
-        // return `${searchName} % :_search OR "${name}" % :_search`;
-      }).join(' OR ');
-      const lang = this.lang;
-      this.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr, { _search, lang });
-      });
-    }
-
-    this.checkDeleted();
-
-    const total = +(await db.from({ w: this.res }).count('*'))[0].count;
-
-    this.sort(_sort, db);
-
-    const s = _sort || this.defaultSort;
-    const sName = s?.replace(/^-/, '')
-    const limit = getQueryLimit({ _limit, _unlimited });
-
-    if (_after && limit && s && this.getTableRows(c)[`${sName}`]) {
-      this.res.where(sName, s[0] === '-' ? '<' : '>', _after);
-      this.res.limit(limit);
-    }
-
-    else this.pagination({
-      _page, _skip, _limit: limit, _unlimited,
-    });
-
-    // if (_or) console.log(this.res.toSQL())
-
-    const result = await this.res;
-
-    const nextAfterData = result?.at(-1)?.[`${sName}`];
-    const addAfterMs = s?.[0] === '-' ? '000' : '999';
-    const nextAfter = nextAfterData instanceof Date ? new Date(nextAfterData).toISOString().replace('Z', `${addAfterMs}Z`) : nextAfterData;
-
-    // const { sql, bindings } = this.res.toSQL();
-    // const { rows : r } = await db.raw(`EXPLAIN ${sql}`, bindings);
-    // const rrr = r.map(rr => Object.values(rr)).join('\n');
-    // const r4 = rrr.match(/(Seq Scan.*?\n.*)/);
-    // if (
-    //   r4
-    //   && !r4[1].match(/Seq Scan on users[\s\S]*Filter: \(id = \d\)$/)
-    // ) console.log('CHECK SEQ SCAN\n', r4[1]);
-
-    let meta: metaType = { total };
-    if (_after) {
-      meta = {
-        ...meta,
-        after: _after,
-        nextAfter : nextAfter ? encodeURIComponent(nextAfter) : undefined,
-      };
-      meta = {
-        ...meta,
-        isFirstPage: false,
-        isLastPage: !result.length || (limit ? result.length < +limit : false),
-      };
-    } else {
-      const limit2 = +limit;
-      const skip = +_skip || 0;
-      const page = +_page || 1;
-      const pages = !limit2 ? 1 : Math.ceil((total-skip) / limit2);
-      meta = {
-        ...meta,
-        limit: limit2,
-        skip,
-        page,
-        pages,
-        nextAfter : page === 1 && nextAfter ? encodeURIComponent(nextAfter) : undefined,
-        nextPage: page >= pages ? undefined : page + 1,
-        isFirstPage: page <= 1,
-        isLastPage: page >= pages,
-      };
-    }
-
-    const hiddenFields = this.getHiddenFields();
-    if (hiddenFields) {
-      for(let i = 0; i < result.length; i++) {
-        this.deleteHiddenFieldsFromResult(result[i], hiddenFields);
-      }
-    }
-
-    return { result, meta };
   }
 
   optionsGetById() {
@@ -686,141 +685,30 @@ export default class CrudBuilder {
     };
   }
 
-  async getById(c: Context) {
-    const { db, roles } = c.env;
-    this.roles = roles;
-    this.user = c.var.user;
-
-    const { id } = c.req.param();
-
-    const {
-      _fields, _lang, _join, ...whereWithParams
-    } = c.req.query();
-    const where = Object.keys(whereWithParams).reduce(
-      (acc: any, key: any) => {
-        if (key[0] !== '_') {
-          const isInt = this.dbTables?.[`${key}`]?.data_type === 'integer';
-          const hasNaN = [].concat(whereWithParams[`${key}`] as never).find((item: any) => Number.isNaN(+item));
-          if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
-          acc[`${key}`] = whereWithParams[`${key}`];
-        }
-        return acc;
-      },
-      {},
-    );
-
-    this.lang = _lang;
-
-    this.rows = this.getTableRows(c);
-    this.res = this.getDbWithSchema(c.env.db);
-
-    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+id)) throw new Error('INTEGER_REQUIRED');
-
-    this.where({ ...where, [`${this.table}.id`]: id }, db);
-
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr);
-      });
-    }
-
-    this.checkDeleted();
-
-    this.fields({
-      c, _fields, _join, db,
-    });
-
-    const result = await this.res.first();
-
-    this.deleteHiddenFieldsFromResult(result, this.getHiddenFields());
-
-    c.set('result', result);
-    c.set('relationsData', this.relations);
-  }
-
-  updateIncomingData(c: Context, data: any) {
-    return Array.isArray(data) ? data.map((item: any) => this.updateData(c, item))
-      : this.updateData(c, data);
-  }
-
-  updateData(c: Context, data: any) {
-    const { user } = c.var;
-    let result = { ...data };
-    const rows = this.getTableRows(c);
-
-    for (const [key, error_code] of Object.entries(this.requiredFields)) {
-      if (!result[`${key}`]) throw new Error(error_code as string);
-    }
-
-    for (const key of this.readOnlyFields) {
-      delete result[`${key}`];
-    }
-
-    result = { ...c.req.param(), ...result };
-
-    for (const r of Object.keys(result)) {
-      if (rows[`${r}`] && typeof result[`${r}`] !== 'undefined') continue;
-      delete result[`${r}`];
-    }
-
-    if (rows.userId && user) result.userId = user.id;
-
-    return result;
-  }
-
   optionsAdd() {
-    const schema = Object.entries(this.dbTables || {}).reduce((acc, [key, data]) => {
-      const keyForbiddeen = this.readOnlyFields.includes(key);
-      return keyForbiddeen ? acc : { ...acc, [key]: data };
-    }, this.additionalFields?.add || {});
-
+    const schema = Object.entries(this.dbTables).reduce<Record<string, unknown>>(
+      (acc, [key, data]) => (this.readOnlyFields.includes(key) ? acc : { ...acc, [key]: data }),
+      this.additionalFields?.add || {},
+    );
     return {
-      tokenRequired: this.tokenRequired.add
-        || this.access.create
-        || this.accessByStatuses.create,
+      tokenRequired: this.tokenRequired.add || this.access.create || this.accessByStatuses.create,
       ownerRequired: this.ownerRequired.add,
       rootRequired: this.rootRequired.add,
       readOnlyFields: this.readOnlyFields,
       requiredFields: Object.keys(this.requiredFields),
-      accessByStatuses: this.accessByStatuses.add,
+      accessByStatuses: this.accessByStatuses.create,
       apiClientMethodNames: this.apiClientMethodNames,
       schema,
     };
   }
 
-  async add(c: Context) {
-    const requestBody = await c.req.json();
-    const bodyKeys = Object.keys(requestBody);
-    const looksLikeArray = bodyKeys.length && bodyKeys.every((j, i) => i === +j);
-    const body = looksLikeArray ? Object.values(requestBody) : requestBody;
-
-    const data: any = this.updateIncomingData(c, body);
-
-    for (const key of Object.keys(data)) {
-      const isInt = this.dbTables?.[`${key}`]?.data_type === 'integer';
-      const hasNaN = [].concat(data[`${key}`]).find((item: any) => item && Number.isNaN(+item));
-      if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
-
-      data[`${key}`] = data[`${key}`] ?? null;
-    }
-
-    const result = await this.getDbWithSchema(c.env.dbWrite).insert(data).returning('*');
-
-    c.set('result', result[0]);
-    c.set('relationsData', this.relations);
-  }
-
   optionsUpdate() {
-    const schema = Object.entries(this.dbTables || {}).reduce((acc, [key, data]) => {
-      const keyForbiddeen = this.readOnlyFields.includes(key);
-      return keyForbiddeen ? acc : { ...acc, [key]: data };
-    }, this.additionalFields?.update || {});
-
+    const schema = Object.entries(this.dbTables).reduce<Record<string, unknown>>(
+      (acc, [key, data]) => (this.readOnlyFields.includes(key) ? acc : { ...acc, [key]: data }),
+      this.additionalFields?.update || {},
+    );
     return {
-      tokenRequired: this.tokenRequired.update
-        || this.access.update
-        || this.accessByStatuses.update,
+      tokenRequired: this.tokenRequired.update || this.access.update || this.accessByStatuses.update,
       ownerRequired: this.ownerRequired.update,
       rootRequired: this.rootRequired.update,
       readOnlyFields: this.readOnlyFields,
@@ -831,35 +719,9 @@ export default class CrudBuilder {
     };
   }
 
-  async update(c: Context) {
-    const { db } = c.env;
-    const where: whereParamsType = { ...c.req.param() };
-    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+where.id)) throw new Error('INTEGER_REQUIRED');
-
-    const rows = this.getTableRows(c);
-
-    if (rows.isDeleted) where.isDeleted = false;
-
-    const data = await c.req.json();
-
-    for (const key of this.readOnlyFields) {
-      delete data[`${key}`];
-    }
-
-    if (Object.keys(data).length) {
-      if (rows.timeUpdated) data.timeUpdated = db.fn.now();
-
-      await this.getDbWithSchema(c.env.dbWrite).update(data).where(where);
-    }
-
-    await this.getById(c);
-  }
-
   optionsDelete() {
     return {
-      tokenRequired: this.tokenRequired.delete
-        || this.access.delete
-        || this.accessByStatuses.delete,
+      tokenRequired: this.tokenRequired.delete || this.access.delete || this.accessByStatuses.delete,
       ownerRequired: this.ownerRequired.delete,
       rootRequired: this.rootRequired.delete,
       accessByStatuses: this.accessByStatuses.delete,
@@ -867,17 +729,264 @@ export default class CrudBuilder {
     };
   }
 
-  async delete(c: Context) {
-    const { user } = c.var;
+  // -- GET (list) ------------------------------------------
 
-    const where: whereParamsType = { ...c.req.param() };
-    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+where.id)) throw new Error('INTEGER_REQUIRED');
+  async get(c: AppContext): Promise<void> {
+    const { result, meta } = await this.getRequestResult(c);
+    c.set('meta', meta);
+    c.set('result', result);
+    c.set('relationsData', this.relations);
+  }
 
-    const rows = this.getTableRows(c);
+  async getRequestResult(
+    c: AppContext,
+    q?: Record<string, string[]>,
+  ): Promise<getResultType<T>> {
+    this.initState(c);
+    const db = c.env.db;
 
-    if (rows.isDeleted) where.isDeleted = false;
+    const queries = q || c.req.queries();
+    const queriesFlat: Record<string, string | string[]> = {};
+    for (const [name, value] of Object.entries(queries)) {
+      queriesFlat[name] = value?.length === 1 ? value[0] : value;
+    }
 
-    const t = this.getDbWithSchema(c.env.dbWrite).where(where);
+    const {
+      _fields,
+      _sort,
+      _page,
+      _skip,
+      _limit,
+      _unlimited,
+      _after,
+      _lang,
+      _search,
+      _join,
+      ...where
+    } = queriesFlat;
+
+    if (_lang) this.state.lang = _lang as string;
+
+    this.fields({ c, _fields: _fields as string, _join, db, _sort: _sort as string });
+
+    // FIX: defaultWhere is trusted, user WHERE is validated
+    this.where(this.defaultWhere, db, { trusted: true });
+    this.where(where, db);
+
+    if (this.defaultWhereRaw) {
+      const whereStr = this.defaultWhereRaw;
+      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
+        this.whereRaw(whereStr);
+      });
+    }
+
+    if (_search && this.searchFields.length) {
+      const whereStr = this.searchFields
+        .map((name) => {
+          const searchName = this.state.langJoin[name] || `"${name}"`;
+          return `${searchName} % :_search`;
+        })
+        .join(' OR ');
+      const lang = this.state.lang;
+      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
+        this.whereRaw(whereStr, { _search, lang });
+      });
+    }
+
+    this.checkDeleted();
+
+    const total = +(await (db as unknown as {
+      from: (arg: unknown) => { count: (field: string) => Promise<Array<{ count: string }>> };
+    }).from({ w: this.state.res }).count('*'))[0].count;
+    this.sort(_sort as string, db);
+
+    // FIX: cursor pagination - use only first sort field
+    const sortFields = ((_sort as string) || this.defaultSort || '').split(',').filter(Boolean);
+    const firstSortField = sortFields[0];
+    const cursorColumnName = firstSortField?.replace(/^-/, '');
+    const limit = getQueryLimit({
+      _limit: _limit as string,
+      _unlimited: _unlimited as string,
+    });
+
+    if (_after && limit && firstSortField && cursorColumnName && this.state.rows[cursorColumnName]) {
+      const direction = firstSortField.startsWith('-') ? '<' : '>';
+      this.state.res.where(cursorColumnName, direction, _after);
+      this.state.res.limit(limit);
+    } else {
+      this.pagination({
+        _page: _page as string,
+        _skip: _skip as string,
+        _limit: limit,
+        _unlimited: _unlimited as string,
+      });
+    }
+
+    const result = await this.state.res;
+
+    const nextAfterData = cursorColumnName ? result?.at(-1)?.[cursorColumnName] : undefined;
+    const addAfterMs = firstSortField?.startsWith('-') ? '000' : '999';
+    const nextAfter = nextAfterData instanceof Date
+      ? new Date(nextAfterData).toISOString().replace('Z', `${addAfterMs}Z`)
+      : nextAfterData;
+
+    let meta: metaType = { total };
+    if (_after) {
+      meta = {
+        ...meta,
+        after: _after as string,
+        nextAfter: nextAfter ? encodeURIComponent(String(nextAfter)) : undefined,
+        isFirstPage: false,
+        isLastPage: !result.length || (limit ? result.length < limit : false),
+      };
+    } else {
+      const limitNum = limit || 0;
+      const skip = toPositiveInt(_skip, 0);
+      const page = toPositiveInt(_page, 1);
+      const pages = !limitNum ? 1 : Math.max(1, Math.ceil(Math.max(0, total - skip) / limitNum));
+      meta = {
+        ...meta,
+        limit: limitNum,
+        skip,
+        page,
+        pages,
+        nextAfter: page === 1 && nextAfter ? encodeURIComponent(String(nextAfter)) : undefined,
+        nextPage: page >= pages ? undefined : page + 1,
+        isFirstPage: page <= 1,
+        isLastPage: page >= pages,
+      };
+    }
+
+    const hiddenFields = this.getHiddenFields();
+    for (const row of result as Record<string, unknown>[]) {
+      this.deleteHiddenFieldsFromResult(row, hiddenFields);
+    }
+
+    return { result: result as T[], meta };
+  }
+
+  // -- GET by ID -------------------------------------------
+
+  async getById(c: AppContext): Promise<void> {
+    this.initState(c);
+    const db = c.env.db;
+    const { id } = c.req.param();
+
+    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+
+    // FIX: validate user-supplied WHERE keys
+    const where: Record<string, string> = {};
+    for (const [key, val] of Object.entries(whereWithParams)) {
+      if (key.startsWith('_')) continue;
+      const isInt = this.dbTables?.[key]?.data_type === 'integer';
+      const hasNaN = ([] as string[]).concat(val as unknown as string[]).find((item: string) => Number.isNaN(+item));
+      if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
+      if (this.state.rows[key]) {
+        where[key] = val;
+      }
+    }
+
+    if (_lang) this.state.lang = _lang;
+
+    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+id)) {
+      throw new Error('INTEGER_REQUIRED');
+    }
+
+    this.where({ ...where, [`${this.table}.id`]: id }, db, { trusted: true });
+
+    if (this.defaultWhereRaw) {
+      const whereStr = this.defaultWhereRaw;
+      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
+        this.whereRaw(whereStr);
+      });
+    }
+
+    this.checkDeleted();
+    this.fields({ c, _fields, _join, db });
+
+    const result = await this.state.res.first();
+    this.deleteHiddenFieldsFromResult(result as Record<string, unknown> | undefined, this.getHiddenFields());
+
+    c.set('result', result);
+    c.set('relationsData', this.relations);
+  }
+
+  // -- POST -------------------------------------------------
+
+  async add(c: AppContext): Promise<void> {
+    this.initState(c);
+
+    // FIX: use Array.isArray instead of heuristic detection
+    const body = await c.req.json();
+    const data = this.updateIncomingData(c, body as Record<string, unknown> | Record<string, unknown>[]);
+
+    const validatedData = Array.isArray(data)
+      ? data.map((item) => this.validateIntegerFields(item))
+      : this.validateIntegerFields(data);
+
+    const result = await this.getDbWithSchema(c.env.dbWrite)
+      .insert(validatedData)
+      .returning('*');
+
+    c.set('result', result[0]);
+    c.set('relationsData', this.relations);
+  }
+
+  private validateIntegerFields(data: Record<string, unknown>): Record<string, unknown> {
+    for (const key of Object.keys(data)) {
+      const isInt = this.dbTables?.[key]?.data_type === 'integer';
+      const hasNaN = ([] as unknown[])
+        .concat(data[key] as never)
+        .find((item: unknown) => item && Number.isNaN(+(item as string)));
+      if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
+      data[key] = data[key] ?? null;
+    }
+    return data;
+  }
+
+  // -- PUT / PATCH -----------------------------------------
+
+  async update(c: AppContext): Promise<void> {
+    this.initState(c);
+    const db = c.env.db;
+    const params = c.req.param();
+    const whereClause: WhereParams = { ...params };
+
+    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+String(whereClause.id))) {
+      throw new Error('INTEGER_REQUIRED');
+    }
+
+    const rows = this.state.rows;
+    if (rows.isDeleted) whereClause.isDeleted = false;
+
+    const rawData = await c.req.json();
+
+    // FIX: filter update data through table columns (same as add)
+    const data = this.filterDataByTableColumns(rawData as Record<string, unknown>, rows);
+
+    if (Object.keys(data).length) {
+      if (rows.timeUpdated) data.timeUpdated = db.fn.now();
+      await this.getDbWithSchema(c.env.dbWrite).update(data).where(whereClause);
+    }
+
+    await this.getById(c);
+  }
+
+  // -- DELETE ----------------------------------------------
+
+  async delete(c: AppContext): Promise<void> {
+    this.initState(c);
+
+    const whereClause: WhereParams = { ...c.req.param() };
+
+    if (this.dbTables?.id?.data_type === 'integer' && Number.isNaN(+String(whereClause.id))) {
+      throw new Error('INTEGER_REQUIRED');
+    }
+
+    const rows = this.state.rows;
+    if (rows.isDeleted) whereClause.isDeleted = false;
+
+    const t = this.getDbWithSchema(c.env.dbWrite).where(whereClause);
     const result = rows.isDeleted ? await t.update({ isDeleted: true }) : await t.delete();
 
     c.set('result', { ok: true });

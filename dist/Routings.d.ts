@@ -1,10 +1,10 @@
 import type { CrudBuilderOptionsType, MiddlewareHandler, RoutesErrorsType, RoutesEmailTemplatesType, RoutesType, RoutingsOptionsType } from './types';
 export declare class Routings {
     routes: RoutesType[];
-    routesPermissions: any;
+    routesPermissions: Record<string, string[]>;
     routesErrors: RoutesErrorsType;
     routesEmailTemplates: RoutesEmailTemplatesType;
-    migrationDirs: string[] | unknown;
+    migrationDirs: string[] | undefined;
     constructor(options?: RoutingsOptionsType);
     private pushToRoutes;
     get(path: string, ...fnArr: MiddlewareHandler[]): void;
