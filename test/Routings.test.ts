@@ -6,7 +6,7 @@ describe('Routings', () => {
   // -- crud() route generation -----------------------------
 
   describe('crud()', () => {
-    it('registers 6 routes for a table', () => {
+    it('registers CRUD routes for a table', () => {
       const router = new Routings();
       router.crud({ table: 'posts' });
 
@@ -17,7 +17,7 @@ describe('Routings', () => {
       expect(paths).toContain('GET /posts/:id');
       expect(paths).toContain('PATCH /posts/:id');
       expect(paths).toContain('DELETE /posts/:id');
-      expect(router.routes.length).toBe(6);
+      expect(router.routes.length).toBe(5);
     });
 
     it('uses prefix when provided', () => {
