@@ -89,6 +89,7 @@ describe('Routings', () => {
         path: '/items',
         permissionPrefix: 'items',
         methodsConfigured: false,
+        tableName: 'items',
       });
     });
   });

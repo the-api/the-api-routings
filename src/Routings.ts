@@ -109,6 +109,7 @@ export class Routings {
       path: p,
       permissionPrefix,
       methodsConfigured,
+      tableName: table,
     });
 
     if (methods?.length) {

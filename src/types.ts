@@ -116,6 +116,7 @@ export type CrudPermissionMeta = {
   path: string;
   permissionPrefix: string;
   methodsConfigured: boolean;
+  tableName: string;
 };
 
 // -- FIX: eliminate `any`, add proper field types ----------

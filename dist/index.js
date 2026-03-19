@@ -1631,7 +1631,8 @@ class Routings {
     this.crudPermissionsMeta.push({
       path: p,
       permissionPrefix,
-      methodsConfigured
+      methodsConfigured,
+      tableName: table
     });
     if (methods?.length) {
       const register = (path, method) => {

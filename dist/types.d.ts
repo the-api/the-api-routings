@@ -92,6 +92,7 @@ export type CrudPermissionMeta = {
     path: string;
     permissionPrefix: string;
     methodsConfigured: boolean;
+    tableName: string;
 };
 export type StringRecord = Record<string, string>;
 export type FieldValue = string | number | boolean | null;
