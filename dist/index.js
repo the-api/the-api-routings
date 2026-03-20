@@ -142,6 +142,35 @@ class CrudBuilder {
       qb.withSchema(this.schema);
     return qb;
   }
+  getNormalizedQuery(c) {
+    const query = c.var?.query;
+    if (query && typeof query === "object" && !Array.isArray(query)) {
+      return { ...query };
+    }
+    return {};
+  }
+  getSingleValueQuery(c) {
+    return Object.entries(this.getNormalizedQuery(c)).reduce((acc, [key, value]) => {
+      acc[key] = Array.isArray(value) ? String(value[0] ?? "") : String(value);
+      return acc;
+    }, {});
+  }
+  getQueryArrays(c, q) {
+    if (q)
+      return q;
+    return Object.entries(this.getNormalizedQuery(c)).reduce((acc, [key, value]) => {
+      acc[key] = Array.isArray(value) ? value.map(String) : [String(value)];
+      return acc;
+    }, {});
+  }
+  async getRequestBody(c) {
+    const body = c.var?.body;
+    if (Array.isArray(body))
+      return body;
+    if (body && typeof body === "object")
+      return body;
+    return {};
+  }
   getKnownColumnNames() {
     const names = new Set;
     for (const col of Object.keys(this.state.rows))
@@ -366,6 +395,7 @@ class CrudBuilder {
       const f2 = ff ? `json_build_object(${ff.join(", ")})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
       const wb = {};
+      const flatQuery2 = this.getSingleValueQuery(c);
       if (whereBindings) {
         const envAll = {
           ...c.env,
@@ -375,7 +405,7 @@ class CrudBuilder {
         const dd = flattening({
           env: envAll,
           params: c.req.param(),
-          query: c.req.query()
+          query: flatQuery2
         });
         for (const [k, v] of Object.entries(whereBindings)) {
           wb[k] = dd[v] ?? null;
@@ -406,12 +436,13 @@ class CrudBuilder {
       }
       joinCoalesce.push(db.raw(sqlToJoin, wb));
     }
-    if (c.req.query()._search && this.searchFields.length) {
+    const flatQuery = this.getSingleValueQuery(c);
+    if (flatQuery._search && this.searchFields.length) {
       const searchColumnsStr = this.searchFields.map((name) => {
         const searchName = this.state.langJoin[name] || `"${name}"`;
         return `COALESCE(${searchName} <-> :_search, 1)`;
       }).join(" + ");
-      joinCoalesce.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, { ...c.req.query(), lang: this.state.lang }));
+      joinCoalesce.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, { ...flatQuery, lang: this.state.lang }));
       if (!_sort)
         this.state.res.orderBy("_search_distance", "ASC");
     }
@@ -587,7 +618,7 @@ class CrudBuilder {
   async getRequestResult(c, q) {
     this.initState(c);
     const db = this.getDbFromContext(c);
-    const queries = q || c.req.queries();
+    const queries = this.getQueryArrays(c, q);
     const queriesFlat = {};
     for (const [name, value] of Object.entries(queries)) {
       queriesFlat[name] = value?.length === 1 ? value[0] : value;
@@ -688,7 +719,7 @@ class CrudBuilder {
     this.initState(c);
     const db = this.getDbFromContext(c);
     const { id } = c.req.param();
-    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+    const { _fields, _lang, _join, ...whereWithParams } = this.getSingleValueQuery(c);
     const where = {};
     for (const [key, val] of Object.entries(whereWithParams)) {
       if (key.startsWith("_"))
@@ -722,7 +753,7 @@ class CrudBuilder {
   }
   async add(c) {
     this.initState(c);
-    const body = await c.req.json();
+    const body = await this.getRequestBody(c);
     const data = this.updateIncomingData(c, body);
     const validatedData = Array.isArray(data) ? data.map((item) => this.validateIntegerFields(item)) : this.validateIntegerFields(data);
     const result = await this.getDbWithSchema(this.getDbWriteFromContext(c)).insert(validatedData).returning("*");
@@ -750,7 +781,7 @@ class CrudBuilder {
     const rows = this.state.rows;
     if (rows.isDeleted)
       whereClause.isDeleted = false;
-    const rawData = await c.req.json();
+    const rawData = await this.getRequestBody(c);
     const data = this.filterDataByTableColumns(rawData, rows);
     if (Object.keys(data).length) {
       if (rows.timeUpdated)
@@ -1445,15 +1476,10 @@ var resolveRuntimeSection = async (section, c, sectionName) => {
   return { schema: section };
 };
 var getQueryData = (c) => {
-  const raw = c.req.queries();
-  return Object.entries(raw).reduce((acc, [key, values]) => {
-    if (!Array.isArray(values) || !values.length) {
-      acc[key] = undefined;
-      return acc;
-    }
-    acc[key] = values.length === 1 ? values[0] : values;
-    return acc;
-  }, {});
+  if (c.var?.query && typeof c.var.query === "object") {
+    return { ...c.var.query };
+  }
+  return {};
 };
 var getHeaderData = (c) => {
   const headers = {};
@@ -1483,11 +1509,8 @@ var validateActionSections = async (c, action, merged) => {
       return bodyData && typeof bodyData === "object" ? bodyData : {};
     }
     bodyLoaded = true;
-    try {
-      bodyData = await c.req.json();
-      if (!bodyData || typeof bodyData !== "object")
-        bodyData = {};
-    } catch {
+    bodyData = c.var?.body;
+    if (!bodyData || typeof bodyData !== "object") {
       bodyData = {};
     }
     return bodyData;

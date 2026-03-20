@@ -1208,7 +1208,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
         const dd: Record<string, unknown> = flattening({
           env: envAll,
           params: c.req.param(),
-          query: c.req.query(),
+          query: c.var.query,
         }) as Record<string, unknown>;
         for (const [k, v] of Object.entries(whereBindings)) {
           wb[k] = dd[v] ?? null;
@@ -1252,7 +1252,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       joinCoalesce.push(db.raw(sqlToJoin, wb) as unknown as string);
     }
 
-    if (c.req.query()._search && this.searchFields.length) {
+    if (c.var.query?._search && this.searchFields.length) {
       const searchColumnsStr = this.searchFields
         .map((name) => {
           const searchName = this.state.langJoin[name] || `"${name}"`;
@@ -1262,7 +1262,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       joinCoalesce.push(
         db.raw(
           `(${searchColumnsStr})/${this.searchFields.length} as _search_distance`,
-          { ...c.req.query(), lang: this.state.lang },
+          { ...c.var.query, lang: this.state.lang },
         ) as unknown as string,
       );
       if (!_sort) this.state.res.orderBy('_search_distance', 'ASC');
@@ -1494,11 +1494,12 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.initState(c);
     const db = c.env.db;
 
-    const queries = q || c.req.queries();
-    const queriesFlat: Record<string, string | string[]> = {};
-    for (const [name, value] of Object.entries(queries)) {
-      queriesFlat[name] = value?.length === 1 ? value[0] : value;
-    }
+    const queriesFlat = q
+      ? Object.entries(q).reduce((acc: Record<string, string | string[]>, [name, value]) => {
+          acc[name] = value?.length === 1 ? value[0] : value;
+          return acc;
+        }, {})
+      : { ...c.var.query };
 
     const {
       _fields,
@@ -1621,7 +1622,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const db = c.env.db;
     const { id } = c.req.param();
 
-    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+    const { _fields, _lang, _join, ...whereWithParams } = c.var.query;
 
     // FIX: validate user-supplied WHERE keys
     const where: Record<string, string> = {};
@@ -1666,7 +1667,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.initState(c);
 
     // FIX: use Array.isArray instead of heuristic detection
-    const body = await c.req.json();
+    const body = c.var.body as Record<string, unknown> | Record<string, unknown>[];
     const data = this.updateIncomingData(c, body as Record<string, unknown> | Record<string, unknown>[]);
 
     const validatedData = Array.isArray(data)
@@ -1708,7 +1709,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const rows = this.state.rows;
     if (rows.isDeleted) whereClause.isDeleted = false;
 
-    const rawData = await c.req.json();
+    const rawData = (c.var.body || {}) as Record<string, unknown>;
 
     // FIX: filter update data through table columns (same as add)
     const data = this.filterDataByTableColumns(rawData as Record<string, unknown>, rows);
@@ -3060,4 +3061,3 @@ describe('Routings', () => {
   });
 });
 ```
-

@@ -63,6 +63,10 @@ export type ContextServices = {
 };
 export type EnvBindings = ContextServices;
 export type VarBindings = ContextServices & {
+    body?: unknown;
+    bodyType?: string;
+    query?: Record<string, string | string[]>;
+    appendQueryParams?: (params: Record<string, unknown>) => void;
     user?: UserType;
     result?: unknown;
     meta?: metaType | Record<string, unknown>;

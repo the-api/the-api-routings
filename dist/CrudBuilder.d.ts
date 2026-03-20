@@ -43,6 +43,10 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     private getDbTablesFromContext;
     private getRolesFromContext;
     private getDbWithSchema;
+    private getNormalizedQuery;
+    private getSingleValueQuery;
+    private getQueryArrays;
+    private getRequestBody;
     private getKnownColumnNames;
     private isValidSortField;
     private isValidWhereKey;
