@@ -672,8 +672,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     // FIX: removed `result = { ...c.req.param(), ...result }` - URL params must not merge into data
     const filtered = this.filterDataByTableColumns(data, rows);
 
-    if (rows.userId && this.state.user) {
-      filtered.userId = this.state.user.id;
+    if (rows[this.userIdFieldName] && this.state.user) {
+      filtered[this.userIdFieldName] = this.state.user.id;
     }
 
     return filtered;

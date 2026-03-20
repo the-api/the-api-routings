@@ -504,8 +504,8 @@ class CrudBuilder {
     }
     const rows = this.state.rows;
     const filtered = this.filterDataByTableColumns(data, rows);
-    if (rows.userId && this.state.user) {
-      filtered.userId = this.state.user.id;
+    if (rows[this.userIdFieldName] && this.state.user) {
+      filtered[this.userIdFieldName] = this.state.user.id;
     }
     return filtered;
   }
@@ -1225,6 +1225,7 @@ var buildPatchFromPost = (post) => {
 };
 var buildCrudValidationSchemaFromTable = (c, params) => {
   const normalizedParams = normalizeCrudConfig(params);
+  const userIdFieldName = normalizedParams.userIdFieldName || "userId";
   const columns = resolveTableColumns(c, normalizedParams);
   const columnEntries = Object.entries(columns);
   const columnNames = columnEntries.map(([name]) => name);
@@ -1308,7 +1309,7 @@ var buildCrudValidationSchemaFromTable = (c, params) => {
   for (const [name, column] of columnEntries) {
     if (readOnly.includes(name))
       continue;
-    const required = column.is_nullable === "NO" && (column.column_default === null || typeof column.column_default === "undefined");
+    const required = name !== userIdFieldName && column.is_nullable === "NO" && (column.column_default === null || typeof column.column_default === "undefined");
     bodyPost[name] = getColumnValidationRule(column, { required });
   }
   const bodyPatch = buildPatchFromPost(bodyPost);

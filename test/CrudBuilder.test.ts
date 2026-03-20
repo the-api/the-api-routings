@@ -293,6 +293,20 @@ describe('Security: URL params not in body', () => {
     expect(data).not.toHaveProperty('id');
     expect(data.name).toBe('New User');
   });
+
+  it('injects userId from token into insert data', async () => {
+    const { c, dbWrite } = buildContext({
+      body: { name: 'New User', email: 'a@b.com', userId: 999 },
+      user: { id: 7 } as never,
+    });
+
+    const crud = new CrudBuilder({ ...defaultOptions, dbTables: usersColumns });
+    await crud.add(c);
+
+    const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
+    const data = insertCalls[0].args[0] as Record<string, unknown>;
+    expect(data.userId).toBe(7);
+  });
 });
 
 // -- 5. Cursor pagination with multi-sort ------------------

@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'bun:test';
 import type { AppContext } from '../src/types';
-import { createCrudValidationMiddleware } from '../src/Validatior';
+import {
+  buildCrudValidationSchemaFromTable,
+  createCrudValidationMiddleware,
+} from '../src/Validatior';
 
 const dbTables = {
   'public.messages': {
     id: { data_type: 'integer', is_nullable: 'NO' },
+    body: { data_type: 'text', is_nullable: 'NO' },
+  },
+  'public.messagesOwned': {
+    id: { data_type: 'integer', is_nullable: 'NO' },
+    userId: { data_type: 'integer', is_nullable: 'NO' },
     body: { data_type: 'text', is_nullable: 'NO' },
   },
 };
@@ -23,6 +31,8 @@ const createContext = (params: Record<string, string> = {}): AppContext => {
     },
     var: {
       dbTables,
+      query: {},
+      body: {},
     },
     env: {
       dbTables,
@@ -60,5 +70,18 @@ describe('CRUD validation middleware', () => {
     });
 
     expect(nextCalled).toBe(false);
+  });
+
+  it('does not require userId in POST body when DB column is NOT NULL', () => {
+    const c = createContext();
+    const schema = buildCrudValidationSchemaFromTable(c, { table: 'messagesOwned' });
+
+    expect(schema.body?.post?.userId).toEqual({
+      type: 'number',
+    });
+    expect(schema.body?.post?.body).toEqual({
+      type: 'string',
+      required: true,
+    });
   });
 });
