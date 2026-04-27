@@ -1190,7 +1190,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : '';
       const limitStr = limit ? `LIMIT ${limit}` : '';
-      const lang = table === 'lang' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
+      const lang = table === 'dict' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
       const ff = joinFields?.map((item) =>
         typeof item === 'string'
           ? `'${item}', "${as || table}"."${item}"`

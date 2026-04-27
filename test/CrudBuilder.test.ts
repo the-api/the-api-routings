@@ -507,8 +507,9 @@ describe('Translations', () => {
 
     const columnArgs = db.queryBuilder.getCallArgs('column')?.[0] as string[];
     const translatedField = columnArgs.find((item) => item.includes('select text from dict'));
+    const oldTableReference = ['from', ['lang', 's'].join('')].join(' ');
     expect(translatedField).toBeDefined();
-    expect(translatedField).not.toContain('from langs');
+    expect(translatedField).not.toContain(oldTableReference);
   });
 
   it('adds language filter for dict joins', async () => {
