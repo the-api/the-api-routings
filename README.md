@@ -110,7 +110,7 @@ GET /users?_from_age=18&_to_age=65       — range (>= and <=)
 | Param | Example | Description |
 |---|---|---|
 | `_search` | `?_search=john` | Trigram search (requires `pg_trgm`) |
-| `_lang` | `?_lang=de` | Translate fields via `langs` table |
+| `_lang` | `?_lang=de` | Translate fields via `dict` table |
 
 ## Routings API
 

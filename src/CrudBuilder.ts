@@ -473,8 +473,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     if (this.state.lang && this.state.lang !== 'en') {
       for (const field of this.translate) {
         this.state.langJoin[field] = `COALESCE( (
-          select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
+          select text from dict where lang=:lang and "textKey" = any(
+            select "textKey" from dict where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
         joinCoalesce.push(
           db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }) as unknown as string,
@@ -504,7 +504,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : '';
       const limitStr = limit ? `LIMIT ${limit}` : '';
-      const lang = table === 'lang' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
+      const lang = table === 'dict' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
       const ff = joinFields?.map((item) =>
         typeof item === 'string'
           ? `'${item}', "${as || table}"."${item}"`

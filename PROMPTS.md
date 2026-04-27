@@ -32,7 +32,7 @@
 | **Сортировка** | `_sort=-created,name,random()` |
 | **Выбор полей** | `_fields=id,name` |
 | **JOIN-ы** | `join`, `leftJoin`, `joinOnDemand` (по запросу через `_join`) |
-| **Мультиязычность** | `_lang=de`, COALESCE-подстановка из таблицы `langs` |
+| **Мультиязычность** | `_lang=de`, COALESCE-подстановка из таблицы `dict` |
 | **Полнотекстовый поиск** | `_search` через триграммы PostgreSQL (`%`, `<->`) |
 | **Soft delete** | `isDeleted` + `deletedReplacements` |
 | **Права доступа** | `tokenRequired`, `ownerRequired`, `rootRequired`, `accessByStatuses`, permission-based скрытие полей |
@@ -199,7 +199,7 @@ GET /users?_from_age=18&_to_age=65       — range (>= and <=)
 | Param | Example | Description |
 |---|---|---|
 | `_search` | `?_search=john` | Trigram search (requires `pg_trgm`) |
-| `_lang` | `?_lang=de` | Translate fields via `langs` table |
+| `_lang` | `?_lang=de` | Translate fields via `dict` table |
 
 ## Routings API
 
@@ -1159,8 +1159,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     if (this.state.lang && this.state.lang !== 'en') {
       for (const field of this.translate) {
         this.state.langJoin[field] = `COALESCE( (
-          select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
+          select text from dict where lang=:lang and "textKey" = any(
+            select "textKey" from dict where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
         joinCoalesce.push(
           db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }) as unknown as string,

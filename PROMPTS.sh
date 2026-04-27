@@ -39,7 +39,7 @@ cat << EOF >> "$OUT_FILE"
 | **Сортировка** | \`_sort=-created,name,random()\` |
 | **Выбор полей** | \`_fields=id,name\` |
 | **JOIN-ы** | \`join\`, \`leftJoin\`, \`joinOnDemand\` (по запросу через \`_join\`) |
-| **Мультиязычность** | \`_lang=de\`, COALESCE-подстановка из таблицы \`langs\` |
+| **Мультиязычность** | \`_lang=de\`, COALESCE-подстановка из таблицы \`dict\` |
 | **Полнотекстовый поиск** | \`_search\` через триграммы PostgreSQL (\`%\`, \`<->\`) |
 | **Soft delete** | \`isDeleted\` + \`deletedReplacements\` |
 | **Права доступа** | \`tokenRequired\`, \`ownerRequired\`, \`rootRequired\`, \`accessByStatuses\`, permission-based скрытие полей |

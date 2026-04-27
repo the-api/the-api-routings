@@ -488,7 +488,54 @@ describe('Hidden fields', () => {
   });
 });
 
-// -- 9. Soft delete ----------------------------------------
+// -- 9. Translations ---------------------------------------
+
+describe('Translations', () => {
+  it('uses dict table for translated fields', async () => {
+    const { c, db } = buildContext({
+      queries: { _lang: ['de'], _limit: ['10'] },
+      queryResult: [{ id: 1, name: 'Alice' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      translate: ['name'],
+    });
+
+    await crud.get(c);
+
+    const columnArgs = db.queryBuilder.getCallArgs('column')?.[0] as string[];
+    const translatedField = columnArgs.find((item) => item.includes('select text from dict'));
+    expect(translatedField).toBeDefined();
+    expect(translatedField).not.toContain('from langs');
+  });
+
+  it('adds language filter for dict joins', async () => {
+    const { c, db } = buildContext({
+      queries: { _lang: ['de'], _limit: ['10'] },
+      queryResult: [{ id: 1, name: 'Alice' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      join: [{
+        table: 'dict',
+        where: '"dict"."textKey" = "users"."status"',
+        fields: ['text'],
+      }],
+    });
+
+    await crud.get(c);
+
+    const columnArgs = db.queryBuilder.getCallArgs('column')?.[0] as string[];
+    const dictJoin = columnArgs.find((item) => item.includes('FROM "dict"'));
+    expect(dictJoin).toContain("AND lang='de'");
+  });
+});
+
+// -- 10. Soft delete ---------------------------------------
 
 describe('Soft delete', () => {
   it('adds isDeleted=false when table has isDeleted column', async () => {
@@ -528,7 +575,7 @@ describe('Soft delete', () => {
   });
 });
 
-// -- 10. getQueryLimit with env vars -----------------------
+// -- 11. getQueryLimit with env vars -----------------------
 
 describe('getQueryLimit (env vars)', () => {
   const origEnv = { ...process.env };
@@ -583,7 +630,7 @@ describe('getQueryLimit (env vars)', () => {
   });
 });
 
-// -- 11. Options methods -----------------------------------
+// -- 12. Options methods -----------------------------------
 
 describe('optionsGet()', () => {
   it('returns documented query parameters', () => {

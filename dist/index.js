@@ -363,8 +363,8 @@ class CrudBuilder {
     if (this.state.lang && this.state.lang !== "en") {
       for (const field of this.translate) {
         this.state.langJoin[field] = `COALESCE( (
-          select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
+          select text from dict where lang=:lang and "textKey" = any(
+            select "textKey" from dict where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
         joinCoalesce.push(db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }));
       }
@@ -390,7 +390,7 @@ class CrudBuilder {
       }
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : "";
       const limitStr = limit ? `LIMIT ${limit}` : "";
-      const lang = table === "lang" && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : "";
+      const lang = table === "dict" && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : "";
       const ff = joinFields?.map((item) => typeof item === "string" ? `'${item}', "${as || table}"."${item}"` : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`);
       const f2 = ff ? `json_build_object(${ff.join(", ")})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
@@ -1587,69 +1587,51 @@ class Routings {
     if (options?.migrationDirs)
       this.migrationDirs = options.migrationDirs;
   }
-  normalizePath(path) {
-    return `/${path}`.replace(/^\/+/, "/");
-  }
-  normalizePrefix(path) {
-    const normalized = this.normalizePath(path).replace(/\/+$/, "");
-    return normalized || "/";
-  }
-  resolvePath(path) {
-    if (path === "*") {
-      return this.pathPrefix && this.pathPrefix !== "/" ? `${this.pathPrefix}/*` : "*";
-    }
-    const normalizedPath = this.normalizePath(path);
-    if (!this.pathPrefix || this.pathPrefix === "/")
-      return normalizedPath;
-    return normalizedPath === "/" ? this.pathPrefix : `${this.pathPrefix}${normalizedPath}`.replace(/^\/+/, "/");
-  }
   pushToRoutes({ method, path, fnArr }) {
-    const resolvedPath = this.resolvePath(path);
     for (const fn of fnArr) {
       const handlers = factory.createHandlers(fn);
-      this.routes.push({ path: resolvedPath, method, handlers });
+      this.routes.push({ path, method, handlers });
     }
   }
   prefix(path) {
-    const scoped = new Routings({ migrationDirs: this.migrationDirs });
-    scoped.routes = this.routes;
-    scoped.routesPermissions = this.routesPermissions;
-    scoped.routesErrors = this.routesErrors;
-    scoped.routesEmailTemplates = this.routesEmailTemplates;
-    scoped.crudPermissionsMeta = this.crudPermissionsMeta;
-    scoped.pathPrefix = this.resolvePath(this.normalizePrefix(path));
-    return scoped;
+    this.pathPrefix = path;
+    return this;
   }
-  get(path, ...fnArr) {
+  get(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "GET", path, fnArr });
     return this;
   }
-  post(path, ...fnArr) {
+  post(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "POST", path, fnArr });
     return this;
   }
-  patch(path, ...fnArr) {
+  patch(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "PATCH", path, fnArr });
     return this;
   }
-  delete(path, ...fnArr) {
+  delete(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "DELETE", path, fnArr });
     return this;
   }
-  use(path, ...fnArr) {
+  use(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ path, fnArr });
     return this;
   }
   all(...fnArr) {
-    this.pushToRoutes({ path: "*", fnArr });
+    const path = `${this.pathPrefix}*`.replace(/^\/+/g, "/");
+    this.pushToRoutes({ path, fnArr });
     return this;
   }
   crud(params) {
     const normalizedParams = normalizeCrudConfig(params);
     const { prefix, table, permissions } = normalizedParams;
     const p = `/${prefix || table}`.replace(/^\/+/, "/");
-    const routePath = this.resolvePath(p);
-    const permissionPrefix = routePath.replace(/^\//, "");
+    const permissionPrefix = p.replace(/^\//, "");
     const methods = permissions?.methods || permissions?.protectedMethods;
     const methodsConfigured = Array.isArray(methods);
     const hasExplicitOwnerPermissions = !!normalizedParams.permissions?.owner?.length;
@@ -1688,7 +1670,7 @@ class Routings {
       await cb.delete(c);
     });
     this.crudPermissionsMeta.push({
-      path: routePath,
+      path: `${this.pathPrefix}${p}`,
       permissionPrefix,
       methodsConfigured,
       tableName: table
@@ -1703,9 +1685,9 @@ class Routings {
       const protectedMethods = methods[0] === "*" ? ["GET", "POST", "PATCH", "DELETE"] : methods;
       for (const method of protectedMethods) {
         if (method === "POST" || method === "GET")
-          register(routePath, method);
+          register(p, method);
         if (method !== "POST")
-          register(`${routePath}/:id`, method);
+          register(`${p}/:id`, method);
       }
     }
   }
