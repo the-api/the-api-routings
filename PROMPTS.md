@@ -539,7 +539,8 @@ MIT © [Dimitry Ivanov](https://github.com/ivanoff)
     "lib": ["ESNext", "DOM"],
     "target": "ESNext",
     "module": "ESNext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
+    "rootDir": "./src",
     "declaration": true,
     "declarationMap": true,
     "emitDeclarationOnly": true,
@@ -1107,13 +1108,13 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || '').replace(/(^|,)-/g, ',').split(',').filter(Boolean);
-        this.state.res.distinct(
-          !f
-            ? []
-            : sortArr
-                .map((item) => !f.includes(item) && `${this.table}.${item}`)
-                .filter(Boolean),
-        );
+        const selectedFields = f;
+        const distinctColumns = selectedFields
+          ? sortArr
+              .filter((item) => !selectedFields.includes(item))
+              .map((item) => `${this.table}.${item}`)
+          : [];
+        this.state.res.distinct(distinctColumns);
       }
     }
 
@@ -1134,8 +1135,11 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     }
 
     if (f) {
-      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
-      f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
+      const selectedFields = f;
+      join = join.filter(({ table, alias }) =>
+        selectedFields.includes(table) || (alias ? selectedFields.includes(alias) : false),
+      );
+      f = selectedFields.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
 
     let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);

@@ -330,7 +330,9 @@ class CrudBuilder {
         this.state.res.leftJoin(...item);
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || "").replace(/(^|,)-/g, ",").split(",").filter(Boolean);
-        this.state.res.distinct(!f ? [] : sortArr.map((item) => !f.includes(item) && `${this.table}.${item}`).filter(Boolean));
+        const selectedFields = f;
+        const distinctColumns = selectedFields ? sortArr.filter((item) => !selectedFields.includes(item)).map((item) => `${this.table}.${item}`) : [];
+        this.state.res.distinct(distinctColumns);
       }
     }
     let join = [...this.join];
@@ -344,8 +346,9 @@ class CrudBuilder {
       }
     }
     if (f) {
-      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
-      f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
+      const selectedFields = f;
+      join = join.filter(({ table, alias }) => selectedFields.includes(table) || (alias ? selectedFields.includes(alias) : false));
+      f = selectedFields.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
     let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);
     if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
