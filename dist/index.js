@@ -177,6 +177,9 @@ class CrudBuilder {
   getRolesFromContext(c) {
     return c.var?.roles || c.env?.roles;
   }
+  getCurrentUserId() {
+    return this.state.user?.userId;
+  }
   getDbWithSchema(db) {
     const qb = db(this.table);
     if (this.schema)
@@ -527,7 +530,9 @@ class CrudBuilder {
   deleteHiddenFieldsFromResult(result, hiddenFields) {
     if (!result || !hiddenFields)
       return;
-    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const currentUserId = this.getCurrentUserId();
+    const resultUserId = result[this.userIdFieldName];
+    const isOwner = currentUserId != null && resultUserId != null && String(resultUserId) === String(currentUserId);
     const fields = hiddenFields[isOwner ? "owner" : "regular"];
     for (const key of fields)
       delete result[key];
@@ -555,7 +560,7 @@ class CrudBuilder {
     const rows = this.state.rows;
     const filtered = this.filterDataByTableColumns(data, rows);
     if (rows[this.userIdFieldName] && this.state.user) {
-      filtered[this.userIdFieldName] = this.state.user.id;
+      filtered[this.userIdFieldName] = this.getCurrentUserId();
     }
     return filtered;
   }

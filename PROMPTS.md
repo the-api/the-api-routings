@@ -357,7 +357,7 @@ join: [{
   alias: 'isLiked',
   field: `EXISTS(SELECT 1 FROM "likes" WHERE "likes"."postId" = "posts"."id" AND "likes"."userId" = :userId)::bool`,
   where: '1=1',
-  whereBindings: { userId: 'env.user.id' },
+  whereBindings: { userId: 'env.user.userId' },
 }]
 ```
 
@@ -484,7 +484,7 @@ router.get('/my-posts', async (c) => {
   const { result, meta } = await crud.getRequestResult(c, {
     _limit: ['5'],
     _sort: ['-timeCreated'],
-    userId: [c.var.user.id],
+    userId: [c.var.user.userId],
   });
   c.set('result', result);
   c.set('meta', meta);
@@ -1323,7 +1323,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     hiddenFields: HiddenFieldsResult,
   ): void {
     if (!result || !hiddenFields) return;
-    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const isOwner = this.state.user?.userId && result[this.userIdFieldName] === this.state.user.userId;
     const fields = hiddenFields[isOwner ? 'owner' : 'regular'];
     for (const key of fields) delete result[key];
   }
@@ -1357,7 +1357,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const filtered = this.filterDataByTableColumns(data, rows);
 
     if (rows.userId && this.state.user) {
-      filtered.userId = this.state.user.id;
+      filtered.userId = this.state.user.userId;
     }
 
     return filtered;
@@ -2532,7 +2532,7 @@ describe('Hidden fields', () => {
       queries: { _limit: ['10'] },
       queryResult: [{ id: 1, name: 'Alice', email: 'a@b.com', userId: 42 }],
       countResult: 1,
-      user: { id: 42 },
+      user: { userId: 42 },
       roles: mockRoles,
     });
 

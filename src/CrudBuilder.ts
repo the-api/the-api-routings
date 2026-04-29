@@ -225,6 +225,10 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     return (c.var?.roles || c.env?.roles) as RequestState['roles'];
   }
 
+  private getCurrentUserId(): UserType['userId'] | undefined {
+    return this.state.user?.userId;
+  }
+
   private getDbWithSchema(db: Knex): Knex.QueryBuilder {
     const qb = db(this.table);
     if (this.schema) qb.withSchema(this.schema);
@@ -686,7 +690,11 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     hiddenFields: HiddenFieldsResult,
   ): void {
     if (!result || !hiddenFields) return;
-    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const currentUserId = this.getCurrentUserId();
+    const resultUserId = result[this.userIdFieldName];
+    const isOwner = currentUserId != null
+      && resultUserId != null
+      && String(resultUserId) === String(currentUserId);
     const fields = hiddenFields[isOwner ? 'owner' : 'regular'];
     for (const key of fields) delete result[key];
   }
@@ -732,7 +740,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const filtered = this.filterDataByTableColumns(data, rows);
 
     if (rows[this.userIdFieldName] && this.state.user) {
-      filtered[this.userIdFieldName] = this.state.user.id;
+      filtered[this.userIdFieldName] = this.getCurrentUserId();
     }
 
     return filtered;

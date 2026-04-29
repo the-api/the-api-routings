@@ -302,7 +302,7 @@ describe('Security: URL params not in body', () => {
   it('injects userId from token into insert data', async () => {
     const { c, dbWrite } = buildContext({
       body: { name: 'New User', email: 'a@b.com', userId: 999 },
-      user: { id: 7 } as never,
+      user: { userId: 7 },
     });
 
     const crud = new CrudBuilder({ ...defaultOptions, dbTables: usersColumns });
@@ -532,7 +532,7 @@ describe('Hidden fields', () => {
       queries: { _limit: ['10'] },
       queryResult: [{ id: 1, name: 'Alice', email: 'a@b.com', userId: 42 }],
       countResult: 1,
-      user: { id: 42 },
+      user: { userId: '42' },
       roles: mockRoles,
     });
 

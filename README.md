@@ -313,7 +313,7 @@ join: [{
   alias: 'isLiked',
   field: `EXISTS(SELECT 1 FROM "likes" WHERE "likes"."postId" = "posts"."id" AND "likes"."userId" = :userId)::bool`,
   where: '1=1',
-  whereBindings: { userId: 'env.user.id' },
+  whereBindings: { userId: 'env.user.userId' },
 }]
 ```
 
@@ -440,7 +440,7 @@ router.get('/my-posts', async (c) => {
   const { result, meta } = await crud.getRequestResult(c, {
     _limit: ['5'],
     _sort: ['-timeCreated'],
-    userId: [c.var.user.id],
+    userId: [c.var.user.userId],
   });
   c.set('result', result);
   c.set('meta', meta);

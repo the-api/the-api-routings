@@ -52,7 +52,7 @@ export type ColumnInfo = DbColumnInfo;
 export type ColumnInfoMap = Record<string, DbColumnInfo>;
 
 export type UserType = {
-  id: string | number;
+  userId: string | number;
   roles?: string[];
   [key: string]: unknown;
 };
