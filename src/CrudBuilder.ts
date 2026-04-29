@@ -59,6 +59,50 @@ const toPositiveInt = (value: unknown, fallback: number): number => {
 const toActionFlags = (input?: CrudAction[]): ActionFlags =>
   (input || []).reduce<ActionFlags>((acc, cur) => ({ ...acc, [cur]: true }), {});
 
+const isNumericDbType = (dataType: unknown): boolean => {
+  const dt = String(dataType || '').toLowerCase();
+  if ([
+    'integer',
+    'int',
+    'int2',
+    'int4',
+    'int8',
+    'smallint',
+    'bigint',
+    'numeric',
+    'decimal',
+    'real',
+    'double precision',
+    'float',
+    'serial',
+    'bigserial',
+    'smallserial',
+  ].includes(dt)) return true;
+
+  return /^(numeric|decimal|float)\b/.test(dt);
+};
+
+const isIntegerDbType = (dataType: unknown): boolean => {
+  const dt = String(dataType || '').toLowerCase();
+  return [
+    'integer',
+    'int',
+    'int2',
+    'int4',
+    'int8',
+    'smallint',
+    'bigint',
+    'serial',
+    'bigserial',
+    'smallserial',
+  ].includes(dt);
+};
+
+const isDateDbType = (dataType: unknown): boolean => {
+  const dt = String(dataType || '').toLowerCase();
+  return dt.includes('date') || dt.includes('timestamp') || dt.includes('time');
+};
+
 // -- Class --------------------------------------------------
 
 export default class CrudBuilder<T extends Record<string, unknown> = Record<string, unknown>> {
@@ -656,10 +700,22 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const filtered: Record<string, unknown> = {};
     for (const key of Object.keys(data)) {
       if (rows[key] && !this.readOnlyFields.includes(key)) {
-        filtered[key] = data[key];
+        filtered[key] = this.normalizeWriteValue(data[key], rows[key]);
       }
     }
     return filtered;
+  }
+
+  private normalizeWriteValue(value: unknown, column: ColumnInfoMap[string]): unknown {
+    if (
+      value === ''
+      && column.is_nullable === 'YES'
+      && (isNumericDbType(column.data_type) || isDateDbType(column.data_type))
+    ) {
+      return null;
+    }
+
+    return value;
   }
 
   private updateData(
@@ -1005,11 +1061,16 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
   }
 
   private validateIntegerFields(data: Record<string, unknown>): Record<string, unknown> {
+    const rows = this.state?.rows || this.dbTables;
     for (const key of Object.keys(data)) {
-      const isInt = this.dbTables?.[key]?.data_type === 'integer';
+      const isInt = isIntegerDbType(rows[key]?.data_type);
       const hasNaN = ([] as unknown[])
         .concat(data[key] as never)
-        .find((item: unknown) => item && Number.isNaN(+(item as string)));
+        .find((item: unknown) =>
+          item !== null
+          && typeof item !== 'undefined'
+          && item !== ''
+          && Number.isNaN(+(item as string)));
       if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
       data[key] = data[key] ?? null;
     }
@@ -1034,7 +1095,9 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const rawData = await this.getRequestBody(c);
 
     // FIX: filter update data through table columns (same as add)
-    const data = this.filterDataByTableColumns(rawData as Record<string, unknown>, rows);
+    const data = this.validateIntegerFields(
+      this.filterDataByTableColumns(rawData as Record<string, unknown>, rows),
+    );
 
     if (Object.keys(data).length) {
       if (rows.timeUpdated) data.timeUpdated = db.fn.now();

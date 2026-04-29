@@ -5,7 +5,7 @@ import {
   usersColumns,
   type MockContextResult,
 } from './helpers';
-import type { CrudBuilderOptionsType } from '../src/types';
+import type { ColumnInfoMap, CrudBuilderOptionsType } from '../src/types';
 
 // -- Defaults ----------------------------------------------
 
@@ -19,6 +19,11 @@ const defaultOptions: CrudBuilderOptionsType = {
 };
 
 const defaultDbTables = { [`${SCHEMA}.${TABLE}`]: usersColumns };
+const usersColumnsWithOptionalTypes: ColumnInfoMap = {
+  ...usersColumns,
+  availableAt: { data_type: 'timestamp', is_nullable: 'YES' },
+  price: { data_type: 'numeric', is_nullable: 'YES' },
+};
 
 function buildContext(overrides: Parameters<typeof createMockContext>[0] = {}): MockContextResult {
   return createMockContext({
@@ -309,7 +314,68 @@ describe('Security: URL params not in body', () => {
   });
 });
 
-// -- 5. Cursor pagination with multi-sort ------------------
+// -- 5. Write input normalization --------------------------
+
+describe('Write input normalization', () => {
+  it('normalizes empty strings for nullable numeric and date fields on insert', async () => {
+    const { c, dbWrite } = createMockContext({
+      dbTables: { [`${SCHEMA}.${TABLE}`]: usersColumnsWithOptionalTypes },
+      body: {
+        name: 'New User',
+        age: '',
+        price: '',
+        availableAt: '',
+      },
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.add(c);
+
+    const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
+    const data = insertCalls[0].args[0] as Record<string, unknown>;
+    expect(data.age).toBeNull();
+    expect(data.price).toBeNull();
+    expect(data.availableAt).toBeNull();
+  });
+
+  it('normalizes empty strings for nullable numeric and date fields on update', async () => {
+    const { c, dbWrite } = createMockContext({
+      dbTables: { [`${SCHEMA}.${TABLE}`]: usersColumnsWithOptionalTypes },
+      params: { id: '1' },
+      body: {
+        age: '',
+        price: '',
+        availableAt: '',
+      },
+      queryResult: [{ id: 1, name: 'Updated' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+    await crud.update(c);
+
+    const updateCalls = dbWrite.queryBuilder.getAllCalls('update');
+    const data = updateCalls[0].args[0] as Record<string, unknown>;
+    expect(data.age).toBeNull();
+    expect(data.price).toBeNull();
+    expect(data.availableAt).toBeNull();
+  });
+
+  it('validates integer fields using table metadata from the request context', async () => {
+    const { c } = buildContext({
+      body: {
+        name: 'New User',
+        age: 'not-a-number',
+      },
+    });
+
+    const crud = new CrudBuilder(defaultOptions);
+
+    await expect(crud.add(c)).rejects.toThrow('INTEGER_REQUIRED');
+  });
+});
+
+// -- 6. Cursor pagination with multi-sort ------------------
 
 describe('Bug fix: cursor pagination with multi-sort', () => {
   it('uses only first sort field for cursor', async () => {
@@ -337,7 +403,7 @@ describe('Bug fix: cursor pagination with multi-sort', () => {
   });
 });
 
-// -- 6. Array detection fix --------------------------------
+// -- 7. Array detection fix --------------------------------
 
 describe('Bug fix: array detection in add()', () => {
   it('handles real array body correctly', async () => {
@@ -372,7 +438,7 @@ describe('Bug fix: array detection in add()', () => {
   });
 });
 
-// -- 7. Negative page validation ---------------------------
+// -- 8. Negative page validation ---------------------------
 
 describe('Bug fix: pagination validation', () => {
   it('clamps negative _page to 1', async () => {
@@ -431,7 +497,7 @@ describe('Bug fix: pagination validation', () => {
   });
 });
 
-// -- 8. Hidden fields --------------------------------------
+// -- 9. Hidden fields --------------------------------------
 
 describe('Hidden fields', () => {
   it('removes hidden fields from list results', async () => {
@@ -488,7 +554,7 @@ describe('Hidden fields', () => {
   });
 });
 
-// -- 9. Translations ---------------------------------------
+// -- 10. Translations --------------------------------------
 
 describe('Translations', () => {
   it('uses dict table for translated fields', async () => {
@@ -536,7 +602,7 @@ describe('Translations', () => {
   });
 });
 
-// -- 10. Soft delete ---------------------------------------
+// -- 11. Soft delete ---------------------------------------
 
 describe('Soft delete', () => {
   it('adds isDeleted=false when table has isDeleted column', async () => {
@@ -576,7 +642,7 @@ describe('Soft delete', () => {
   });
 });
 
-// -- 11. getQueryLimit with env vars -----------------------
+// -- 12. getQueryLimit with env vars -----------------------
 
 describe('getQueryLimit (env vars)', () => {
   const origEnv = { ...process.env };
@@ -631,7 +697,7 @@ describe('getQueryLimit (env vars)', () => {
   });
 });
 
-// -- 12. Options methods -----------------------------------
+// -- 13. Options methods -----------------------------------
 
 describe('optionsGet()', () => {
   it('returns documented query parameters', () => {

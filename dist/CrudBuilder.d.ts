@@ -59,6 +59,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     private getHiddenFields;
     private deleteHiddenFieldsFromResult;
     private filterDataByTableColumns;
+    private normalizeWriteValue;
     private updateData;
     private updateIncomingData;
     optionsGet(): {

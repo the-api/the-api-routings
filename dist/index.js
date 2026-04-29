@@ -33,6 +33,47 @@ var toPositiveInt = (value, fallback) => {
   return Math.floor(n);
 };
 var toActionFlags = (input) => (input || []).reduce((acc, cur) => ({ ...acc, [cur]: true }), {});
+var isNumericDbType = (dataType) => {
+  const dt = String(dataType || "").toLowerCase();
+  if ([
+    "integer",
+    "int",
+    "int2",
+    "int4",
+    "int8",
+    "smallint",
+    "bigint",
+    "numeric",
+    "decimal",
+    "real",
+    "double precision",
+    "float",
+    "serial",
+    "bigserial",
+    "smallserial"
+  ].includes(dt))
+    return true;
+  return /^(numeric|decimal|float)\b/.test(dt);
+};
+var isIntegerDbType = (dataType) => {
+  const dt = String(dataType || "").toLowerCase();
+  return [
+    "integer",
+    "int",
+    "int2",
+    "int4",
+    "int8",
+    "smallint",
+    "bigint",
+    "serial",
+    "bigserial",
+    "smallserial"
+  ].includes(dt);
+};
+var isDateDbType = (dataType) => {
+  const dt = String(dataType || "").toLowerCase();
+  return dt.includes("date") || dt.includes("timestamp") || dt.includes("time");
+};
 
 class CrudBuilder {
   table;
@@ -495,10 +536,16 @@ class CrudBuilder {
     const filtered = {};
     for (const key of Object.keys(data)) {
       if (rows[key] && !this.readOnlyFields.includes(key)) {
-        filtered[key] = data[key];
+        filtered[key] = this.normalizeWriteValue(data[key], rows[key]);
       }
     }
     return filtered;
+  }
+  normalizeWriteValue(value, column) {
+    if (value === "" && column.is_nullable === "YES" && (isNumericDbType(column.data_type) || isDateDbType(column.data_type))) {
+      return null;
+    }
+    return value;
   }
   updateData(c, data) {
     for (const [key, errorCode] of Object.entries(this.requiredFields)) {
@@ -764,9 +811,10 @@ class CrudBuilder {
     c.set("relationsData", this.relations);
   }
   validateIntegerFields(data) {
+    const rows = this.state?.rows || this.dbTables;
     for (const key of Object.keys(data)) {
-      const isInt = this.dbTables?.[key]?.data_type === "integer";
-      const hasNaN = [].concat(data[key]).find((item) => item && Number.isNaN(+item));
+      const isInt = isIntegerDbType(rows[key]?.data_type);
+      const hasNaN = [].concat(data[key]).find((item) => item !== null && typeof item !== "undefined" && item !== "" && Number.isNaN(+item));
       if (isInt && hasNaN)
         throw new Error("INTEGER_REQUIRED");
       data[key] = data[key] ?? null;
@@ -785,7 +833,7 @@ class CrudBuilder {
     if (rows.isDeleted)
       whereClause.isDeleted = false;
     const rawData = await this.getRequestBody(c);
-    const data = this.filterDataByTableColumns(rawData, rows);
+    const data = this.validateIntegerFields(this.filterDataByTableColumns(rawData, rows));
     if (Object.keys(data).length) {
       if (rows.timeUpdated)
         data.timeUpdated = db.fn.now();
@@ -1107,7 +1155,7 @@ var splitSortFields = (value) => {
     return value;
   return value.split(",").map((item) => item.trim().replace(/^-/, "")).filter(Boolean);
 };
-var isNumericDbType = (dataType) => {
+var isNumericDbType2 = (dataType) => {
   const dt = dataType.toLowerCase();
   return [
     "integer",
@@ -1124,7 +1172,7 @@ var isNumericDbType = (dataType) => {
   ].some((name) => dt.includes(name));
 };
 var isBooleanDbType = (dataType) => dataType.toLowerCase().includes("bool");
-var isDateDbType = (dataType) => {
+var isDateDbType2 = (dataType) => {
   const dt = dataType.toLowerCase();
   return dt.includes("date") || dt.includes("timestamp") || dt.includes("time");
 };
@@ -1143,7 +1191,7 @@ var getColumnValidationRule = (column, options) => {
     };
   }
   const dataType = String(column.data_type || "").toLowerCase();
-  if (isNumericDbType(dataType)) {
+  if (isNumericDbType2(dataType)) {
     return {
       type: "number",
       ...typeof column.check_min === "number" && { min: column.check_min },
@@ -1154,7 +1202,7 @@ var getColumnValidationRule = (column, options) => {
   if (isBooleanDbType(dataType)) {
     return { type: "boolean", ...required && { required: true } };
   }
-  if (isDateDbType(dataType)) {
+  if (isDateDbType2(dataType)) {
     return { type: "date", ...required && { required: true } };
   }
   if (isJsonDbType(dataType)) {
