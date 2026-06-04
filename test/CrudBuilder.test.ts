@@ -293,6 +293,32 @@ describe('Security: URL params not in body', () => {
     expect(data).not.toHaveProperty('id');
     expect(data.name).toBe('New User');
   });
+
+  it('uses configured userIdFieldName when assigning owner on insert', async () => {
+    const ownerColumns = {
+      ...usersColumns,
+      ownerId: { data_type: 'integer', is_nullable: 'NO' },
+    };
+    delete ownerColumns.userId;
+
+    const { c, dbWrite } = buildContext({
+      body: { name: 'Owned User', email: 'owned@example.com' },
+      dbTables: { [`${SCHEMA}.${TABLE}`]: ownerColumns },
+      user: { id: 42 },
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      dbTables: ownerColumns,
+      userIdFieldName: 'ownerId',
+    });
+    await crud.add(c);
+
+    const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
+    const data = insertCalls[0].args[0] as Record<string, unknown>;
+    expect(data.ownerId).toBe(42);
+    expect(data).not.toHaveProperty('userId');
+  });
 });
 
 // -- 5. Cursor pagination with multi-sort ------------------
