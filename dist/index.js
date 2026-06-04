@@ -33,6 +33,47 @@ var toPositiveInt = (value, fallback) => {
   return Math.floor(n);
 };
 var toActionFlags = (input) => (input || []).reduce((acc, cur) => ({ ...acc, [cur]: true }), {});
+var isNumericDbType = (dataType) => {
+  const dt = String(dataType || "").toLowerCase();
+  if ([
+    "integer",
+    "int",
+    "int2",
+    "int4",
+    "int8",
+    "smallint",
+    "bigint",
+    "numeric",
+    "decimal",
+    "real",
+    "double precision",
+    "float",
+    "serial",
+    "bigserial",
+    "smallserial"
+  ].includes(dt))
+    return true;
+  return /^(numeric|decimal|float)\b/.test(dt);
+};
+var isIntegerDbType = (dataType) => {
+  const dt = String(dataType || "").toLowerCase();
+  return [
+    "integer",
+    "int",
+    "int2",
+    "int4",
+    "int8",
+    "smallint",
+    "bigint",
+    "serial",
+    "bigserial",
+    "smallserial"
+  ].includes(dt);
+};
+var isDateDbType = (dataType) => {
+  const dt = String(dataType || "").toLowerCase();
+  return dt.includes("date") || dt.includes("timestamp") || dt.includes("time");
+};
 
 class CrudBuilder {
   table;
@@ -136,11 +177,43 @@ class CrudBuilder {
   getRolesFromContext(c) {
     return c.var?.roles || c.env?.roles;
   }
+  getCurrentUserId() {
+    return this.state.user?.userId ?? this.state.user?.id;
+  }
   getDbWithSchema(db) {
     const qb = db(this.table);
     if (this.schema)
       qb.withSchema(this.schema);
     return qb;
+  }
+  getNormalizedQuery(c) {
+    const query = c.var?.query;
+    if (query && typeof query === "object" && !Array.isArray(query)) {
+      return { ...query };
+    }
+    return {};
+  }
+  getSingleValueQuery(c) {
+    return Object.entries(this.getNormalizedQuery(c)).reduce((acc, [key, value]) => {
+      acc[key] = Array.isArray(value) ? String(value[0] ?? "") : String(value);
+      return acc;
+    }, {});
+  }
+  getQueryArrays(c, q) {
+    if (q)
+      return q;
+    return Object.entries(this.getNormalizedQuery(c)).reduce((acc, [key, value]) => {
+      acc[key] = Array.isArray(value) ? value.map(String) : [String(value)];
+      return acc;
+    }, {});
+  }
+  async getRequestBody(c) {
+    const body = c.var?.body;
+    if (Array.isArray(body))
+      return body;
+    if (body && typeof body === "object")
+      return body;
+    return {};
   }
   getKnownColumnNames() {
     const names = new Set;
@@ -301,7 +374,9 @@ class CrudBuilder {
         this.state.res.leftJoin(...item);
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || "").replace(/(^|,)-/g, ",").split(",").filter(Boolean);
-        this.state.res.distinct(!f ? [] : sortArr.map((item) => !f.includes(item) && `${this.table}.${item}`).filter(Boolean));
+        const selectedFields = f;
+        const distinctColumns = selectedFields ? sortArr.filter((item) => !selectedFields.includes(item)).map((item) => `${this.table}.${item}`) : [];
+        this.state.res.distinct(distinctColumns);
       }
     }
     let join = [...this.join];
@@ -315,8 +390,9 @@ class CrudBuilder {
       }
     }
     if (f) {
-      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
-      f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
+      const selectedFields = f;
+      join = join.filter(({ table, alias }) => selectedFields.includes(table) || (alias ? selectedFields.includes(alias) : false));
+      f = selectedFields.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
     let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);
     if (this.includeDeleted && this.deletedReplacements && this.state.rows.isDeleted) {
@@ -334,8 +410,8 @@ class CrudBuilder {
     if (this.state.lang && this.state.lang !== "en") {
       for (const field of this.translate) {
         this.state.langJoin[field] = `COALESCE( (
-          select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
+          select text from dict where lang=:lang and "textKey" = any(
+            select "textKey" from dict where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
         joinCoalesce.push(db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }));
       }
@@ -361,11 +437,12 @@ class CrudBuilder {
       }
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : "";
       const limitStr = limit ? `LIMIT ${limit}` : "";
-      const lang = table === "lang" && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : "";
+      const lang = table === "dict" && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : "";
       const ff = joinFields?.map((item) => typeof item === "string" ? `'${item}', "${as || table}"."${item}"` : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`);
       const f2 = ff ? `json_build_object(${ff.join(", ")})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
       const wb = {};
+      const flatQuery2 = this.getSingleValueQuery(c);
       if (whereBindings) {
         const envAll = {
           ...c.env,
@@ -375,7 +452,7 @@ class CrudBuilder {
         const dd = flattening({
           env: envAll,
           params: c.req.param(),
-          query: c.req.query()
+          query: flatQuery2
         });
         for (const [k, v] of Object.entries(whereBindings)) {
           wb[k] = dd[v] ?? null;
@@ -406,12 +483,13 @@ class CrudBuilder {
       }
       joinCoalesce.push(db.raw(sqlToJoin, wb));
     }
-    if (c.req.query()._search && this.searchFields.length) {
+    const flatQuery = this.getSingleValueQuery(c);
+    if (flatQuery._search && this.searchFields.length) {
       const searchColumnsStr = this.searchFields.map((name) => {
         const searchName = this.state.langJoin[name] || `"${name}"`;
         return `COALESCE(${searchName} <-> :_search, 1)`;
       }).join(" + ");
-      joinCoalesce.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, { ...c.req.query(), lang: this.state.lang }));
+      joinCoalesce.push(db.raw(`(${searchColumnsStr})/${this.searchFields.length} as _search_distance`, { ...flatQuery, lang: this.state.lang }));
       if (!_sort)
         this.state.res.orderBy("_search_distance", "ASC");
     }
@@ -452,7 +530,9 @@ class CrudBuilder {
   deleteHiddenFieldsFromResult(result, hiddenFields) {
     if (!result || !hiddenFields)
       return;
-    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const currentUserId = this.getCurrentUserId();
+    const resultUserId = result[this.userIdFieldName];
+    const isOwner = currentUserId != null && resultUserId != null && String(resultUserId) === String(currentUserId);
     const fields = hiddenFields[isOwner ? "owner" : "regular"];
     for (const key of fields)
       delete result[key];
@@ -461,10 +541,16 @@ class CrudBuilder {
     const filtered = {};
     for (const key of Object.keys(data)) {
       if (rows[key] && !this.readOnlyFields.includes(key)) {
-        filtered[key] = data[key];
+        filtered[key] = this.normalizeWriteValue(data[key], rows[key]);
       }
     }
     return filtered;
+  }
+  normalizeWriteValue(value, column) {
+    if (value === "" && column.is_nullable === "YES" && (isNumericDbType(column.data_type) || isDateDbType(column.data_type))) {
+      return null;
+    }
+    return value;
   }
   updateData(c, data) {
     for (const [key, errorCode] of Object.entries(this.requiredFields)) {
@@ -473,8 +559,8 @@ class CrudBuilder {
     }
     const rows = this.state.rows;
     const filtered = this.filterDataByTableColumns(data, rows);
-    if (rows.userId && this.state.user) {
-      filtered.userId = this.state.user.id;
+    if (rows[this.userIdFieldName] && this.state.user) {
+      filtered[this.userIdFieldName] = this.getCurrentUserId();
     }
     return filtered;
   }
@@ -587,7 +673,7 @@ class CrudBuilder {
   async getRequestResult(c, q) {
     this.initState(c);
     const db = this.getDbFromContext(c);
-    const queries = q || c.req.queries();
+    const queries = this.getQueryArrays(c, q);
     const queriesFlat = {};
     for (const [name, value] of Object.entries(queries)) {
       queriesFlat[name] = value?.length === 1 ? value[0] : value;
@@ -688,7 +774,7 @@ class CrudBuilder {
     this.initState(c);
     const db = this.getDbFromContext(c);
     const { id } = c.req.param();
-    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+    const { _fields, _lang, _join, ...whereWithParams } = this.getSingleValueQuery(c);
     const where = {};
     for (const [key, val] of Object.entries(whereWithParams)) {
       if (key.startsWith("_"))
@@ -722,7 +808,7 @@ class CrudBuilder {
   }
   async add(c) {
     this.initState(c);
-    const body = await c.req.json();
+    const body = await this.getRequestBody(c);
     const data = this.updateIncomingData(c, body);
     const validatedData = Array.isArray(data) ? data.map((item) => this.validateIntegerFields(item)) : this.validateIntegerFields(data);
     const result = await this.getDbWithSchema(this.getDbWriteFromContext(c)).insert(validatedData).returning("*");
@@ -730,9 +816,10 @@ class CrudBuilder {
     c.set("relationsData", this.relations);
   }
   validateIntegerFields(data) {
+    const rows = this.state?.rows || this.dbTables;
     for (const key of Object.keys(data)) {
-      const isInt = this.dbTables?.[key]?.data_type === "integer";
-      const hasNaN = [].concat(data[key]).find((item) => item && Number.isNaN(+item));
+      const isInt = isIntegerDbType(rows[key]?.data_type);
+      const hasNaN = [].concat(data[key]).find((item) => item !== null && typeof item !== "undefined" && item !== "" && Number.isNaN(+item));
       if (isInt && hasNaN)
         throw new Error("INTEGER_REQUIRED");
       data[key] = data[key] ?? null;
@@ -750,8 +837,8 @@ class CrudBuilder {
     const rows = this.state.rows;
     if (rows.isDeleted)
       whereClause.isDeleted = false;
-    const rawData = await c.req.json();
-    const data = this.filterDataByTableColumns(rawData, rows);
+    const rawData = await this.getRequestBody(c);
+    const data = this.validateIntegerFields(this.filterDataByTableColumns(rawData, rows));
     if (Object.keys(data).length) {
       if (rows.timeUpdated)
         data.timeUpdated = db.fn.now();
@@ -776,6 +863,772 @@ class CrudBuilder {
 }
 // src/Routings.ts
 import { createFactory } from "hono/factory";
+
+// src/crudConfig.ts
+var DEFAULT_READONLY_FIELDS = [
+  "id",
+  "timeCreated",
+  "timeUpdated",
+  "timeDeleted",
+  "isDeleted"
+];
+var unique = (values = []) => Array.from(new Set(values));
+var hasOwn = (obj, key) => !!obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key);
+var toArray = (values) => Array.isArray(values) ? values.filter((item) => typeof item === "string") : [];
+var toMap = (values) => {
+  if (!values || typeof values !== "object" || Array.isArray(values))
+    return {};
+  return Object.entries(values).reduce((acc, [key, raw]) => {
+    const arr = toArray(raw);
+    if (arr.length)
+      acc[key] = arr;
+    return acc;
+  }, {});
+};
+var buildPermissions = (permissions, viewable, editable) => {
+  const next = { ...permissions || {} };
+  const fields = {};
+  if (Object.keys(viewable).length)
+    fields.viewable = viewable;
+  if (Object.keys(editable).length)
+    fields.editable = editable;
+  if (Object.keys(fields).length)
+    next.fields = fields;
+  else
+    delete next.fields;
+  return Object.keys(next).length ? next : undefined;
+};
+var normalizeCrudConfig = (params) => {
+  const fieldRules = params.fieldRules || {};
+  const hasFieldRuleHidden = hasOwn(fieldRules, "hidden");
+  const hasFieldRuleReadOnly = hasOwn(fieldRules, "readOnly");
+  const hidden = hasFieldRuleHidden ? toArray(fieldRules.hidden) : [];
+  const readOnly = hasFieldRuleReadOnly ? toArray(fieldRules.readOnly) : undefined;
+  const visibleFor = toMap(fieldRules.visibleFor);
+  const editableFor = toMap(fieldRules.editableFor);
+  const next = { ...params };
+  if (hasFieldRuleHidden)
+    next.hiddenFields = hidden;
+  else
+    delete next.hiddenFields;
+  if (Array.isArray(readOnly)) {
+    next.readOnlyFields = unique([...readOnly, ...hidden]);
+  } else if (hidden.length) {
+    next.readOnlyFields = unique([...DEFAULT_READONLY_FIELDS, ...hidden]);
+  } else {
+    delete next.readOnlyFields;
+  }
+  next.permissions = buildPermissions(params.permissions, visibleFor, editableFor);
+  return next;
+};
+
+// src/Validatior.ts
+var DEFAULT_READONLY_FIELDS2 = [
+  "id",
+  "timeCreated",
+  "timeUpdated",
+  "timeDeleted",
+  "isDeleted"
+];
+var DEFAULT_VALIDATION_ERROR = {
+  code: 22,
+  status: 400,
+  description: "Validation error"
+};
+var toPlainObject = (input) => input && typeof input === "object" && !Array.isArray(input) ? input : null;
+var isPlainObject = (input) => !!toPlainObject(input);
+var isEmptyPlainObject = (input) => isPlainObject(input) && Object.keys(input).length === 0;
+var isValidationResolver = (section) => typeof section === "function";
+var withSectionPrefix = (section, issues) => issues.map((issue) => {
+  if (issue.field.startsWith(`${section}.`) || issue.field === section) {
+    return issue;
+  }
+  return { ...issue, field: `${section}.${issue.field}` };
+});
+var toExpected = (rule) => {
+  const expected = {};
+  if (typeof rule.type !== "undefined")
+    expected.type = rule.type;
+  if (rule.required === true)
+    expected.required = true;
+  if (typeof rule.min === "number")
+    expected.min = rule.min;
+  if (typeof rule.max === "number")
+    expected.max = rule.max;
+  if (Array.isArray(rule.enum))
+    expected.enum = rule.enum;
+  if (rule.items)
+    expected.items = toExpected(rule.items);
+  if (rule.properties) {
+    expected.properties = Object.entries(rule.properties).reduce((acc, [key, value]) => {
+      acc[key] = toExpected(value);
+      return acc;
+    }, {});
+  }
+  return expected;
+};
+var formatValueForMessage = (value) => {
+  if (typeof value === "string")
+    return `'${value}'`;
+  if (value === null || typeof value === "undefined")
+    return "null";
+  if (value instanceof Date)
+    return `'${value.toISOString()}'`;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+var makeIssue = (field, message, expected, value) => ({
+  field,
+  message,
+  expected,
+  value: value ?? null
+});
+var isMissingValue = (value) => typeof value === "undefined" || value === null || value === "";
+var canBeNumber = (value) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return { ok: true, num: value };
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const num = Number(value);
+    if (Number.isFinite(num)) {
+      return { ok: true, num };
+    }
+  }
+  return { ok: false };
+};
+var canBeBoolean = (value) => {
+  if (typeof value === "boolean")
+    return true;
+  if (typeof value !== "string")
+    return false;
+  return ["true", "false", "1", "0"].includes(value.toLowerCase());
+};
+var canBeDate = (value) => {
+  if (value instanceof Date)
+    return !Number.isNaN(value.getTime());
+  if (typeof value === "string" && value.toUpperCase() === "NOW()")
+    return true;
+  if (typeof value === "string" || typeof value === "number") {
+    const d = new Date(value);
+    return !Number.isNaN(d.getTime());
+  }
+  return false;
+};
+var normalizeTypeList = (rule) => {
+  if (Array.isArray(rule.type))
+    return rule.type;
+  if (typeof rule.type === "string")
+    return [rule.type];
+  if (Array.isArray(rule.enum))
+    return ["enum"];
+  if (rule.items)
+    return ["array"];
+  if (rule.properties)
+    return ["object"];
+  return [];
+};
+var validateByType = (value, rule, type, field) => {
+  const expected = toExpected({ ...rule, type });
+  if (type === "string") {
+    if (typeof value === "string")
+      return [];
+    return [makeIssue(field, `Expected a string, but received ${formatValueForMessage(value)}`, expected, value)];
+  }
+  if (type === "number") {
+    const parsed = canBeNumber(value);
+    if (!parsed.ok) {
+      if (typeof rule.min === "number" && typeof rule.max === "number") {
+        return [makeIssue(field, `Expected a number between ${rule.min} and ${rule.max}, but received ${formatValueForMessage(value)}`, expected, value)];
+      }
+      return [makeIssue(field, `Expected a number, but received ${formatValueForMessage(value)}`, expected, value)];
+    }
+    const num = parsed.num;
+    if (typeof rule.min === "number" && num < rule.min) {
+      return [makeIssue(field, `Expected a number greater than or equal to ${rule.min}, but received ${formatValueForMessage(value)}`, expected, value)];
+    }
+    if (typeof rule.max === "number" && num > rule.max) {
+      return [makeIssue(field, `Expected a number less than or equal to ${rule.max}, but received ${formatValueForMessage(value)}`, expected, value)];
+    }
+    return [];
+  }
+  if (type === "boolean") {
+    if (canBeBoolean(value))
+      return [];
+    return [makeIssue(field, `Expected a boolean, but received ${formatValueForMessage(value)}`, expected, value)];
+  }
+  if (type === "date") {
+    if (canBeDate(value))
+      return [];
+    return [makeIssue(field, `Expected a date, but received ${formatValueForMessage(value)}`, expected, value)];
+  }
+  if (type === "enum") {
+    const enumValues = Array.isArray(rule.enum) ? rule.enum : [];
+    const isAllowed = enumValues.some((item) => item === value || String(item) === String(value));
+    if (isAllowed)
+      return [];
+    return [makeIssue(field, `Expected one of [${enumValues.join(", ")}], but received ${formatValueForMessage(value)}`, expected, value)];
+  }
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      return [makeIssue(field, `Expected an array, but received ${formatValueForMessage(value)}`, expected, value)];
+    }
+    if (!rule.items)
+      return [];
+    const errors = [];
+    for (let i = 0;i < value.length; i += 1) {
+      errors.push(...validateValue(value[i], rule.items, `${field}[${i}]`));
+    }
+    return errors;
+  }
+  if (type === "object") {
+    if (!isPlainObject(value)) {
+      return [makeIssue(field, `Expected an object, but received ${formatValueForMessage(value)}`, expected, value)];
+    }
+    if (!rule.properties)
+      return [];
+    const errors = [];
+    for (const [key, nestedRule] of Object.entries(rule.properties)) {
+      errors.push(...validateValue(value[key], nestedRule, `${field}.${key}`));
+    }
+    return errors;
+  }
+  return [];
+};
+var validateValue = (value, rule, field) => {
+  if (isMissingValue(value)) {
+    if (rule.required === true) {
+      return [makeIssue(field, "This field is required but was not provided", toExpected(rule), value)];
+    }
+    return [];
+  }
+  let processed = value;
+  if (typeof rule.preprocess === "function") {
+    try {
+      processed = rule.preprocess(value);
+    } catch (err) {
+      return [makeIssue(field, `Failed to preprocess value: ${err instanceof Error ? err.message : String(err)}`, toExpected(rule), value)];
+    }
+  }
+  const types = normalizeTypeList(rule);
+  if (!types.length)
+    return [];
+  if (types.length === 1) {
+    return validateByType(processed, rule, types[0], field);
+  }
+  let bestErrors = [];
+  for (const t of types) {
+    const errs = validateByType(processed, rule, t, field);
+    if (!errs.length)
+      return [];
+    if (!bestErrors.length)
+      bestErrors = errs;
+  }
+  if (bestErrors.length)
+    return bestErrors;
+  return [makeIssue(field, `Expected one of types [${types.join(", ")}], but received ${formatValueForMessage(processed)}`, toExpected(rule), processed)];
+};
+var validateDataBySchema = (data, schema, section) => {
+  const errors = [];
+  for (const [field, rule] of Object.entries(schema)) {
+    errors.push(...validateValue(data[field], rule, `${section}.${field}`));
+  }
+  return errors;
+};
+var parseJsonArray = (value) => {
+  if (Array.isArray(value))
+    return value;
+  if (typeof value !== "string")
+    return value;
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed : value;
+};
+var splitCsv = (value) => {
+  if (Array.isArray(value))
+    return value;
+  if (typeof value !== "string")
+    return value;
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+};
+var splitSortFields = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim().replace(/^-/, "")).filter(Boolean);
+  }
+  if (typeof value !== "string")
+    return value;
+  return value.split(",").map((item) => item.trim().replace(/^-/, "")).filter(Boolean);
+};
+var isNumericDbType2 = (dataType) => {
+  const dt = dataType.toLowerCase();
+  return [
+    "integer",
+    "int",
+    "smallint",
+    "bigint",
+    "numeric",
+    "decimal",
+    "real",
+    "double precision",
+    "float",
+    "serial",
+    "bigserial"
+  ].some((name) => dt.includes(name));
+};
+var isBooleanDbType = (dataType) => dataType.toLowerCase().includes("bool");
+var isDateDbType2 = (dataType) => {
+  const dt = dataType.toLowerCase();
+  return dt.includes("date") || dt.includes("timestamp") || dt.includes("time");
+};
+var isJsonDbType = (dataType) => {
+  const dt = dataType.toLowerCase();
+  return dt.includes("json");
+};
+var getColumnValidationRule = (column, options) => {
+  const required = options?.required === true;
+  const enumValues = column.enum_values || column.check_enum;
+  if (Array.isArray(enumValues) && enumValues.length) {
+    return {
+      type: "enum",
+      enum: enumValues,
+      ...required && { required: true }
+    };
+  }
+  const dataType = String(column.data_type || "").toLowerCase();
+  if (isNumericDbType2(dataType)) {
+    return {
+      type: "number",
+      ...typeof column.check_min === "number" && { min: column.check_min },
+      ...typeof column.check_max === "number" && { max: column.check_max },
+      ...required && { required: true }
+    };
+  }
+  if (isBooleanDbType(dataType)) {
+    return { type: "boolean", ...required && { required: true } };
+  }
+  if (isDateDbType2(dataType)) {
+    return { type: "date", ...required && { required: true } };
+  }
+  if (isJsonDbType(dataType)) {
+    return { type: ["object", "array"], ...required && { required: true } };
+  }
+  return { type: "string", ...required && { required: true } };
+};
+var withArrayAlternative = (rule) => {
+  const { preprocess, ...cleanRule } = rule;
+  if (Array.isArray(cleanRule.type)) {
+    if (cleanRule.type.includes("array"))
+      return cleanRule;
+    return {
+      ...cleanRule,
+      type: [...cleanRule.type, "array"],
+      items: cleanRule.items || { ...cleanRule, required: false }
+    };
+  }
+  if (cleanRule.type === "array")
+    return cleanRule;
+  if (!cleanRule.type && Array.isArray(cleanRule.enum)) {
+    return {
+      ...cleanRule,
+      type: ["enum", "array"],
+      items: { type: "enum", enum: cleanRule.enum }
+    };
+  }
+  return {
+    ...cleanRule,
+    type: [cleanRule.type || "string", "array"],
+    items: cleanRule.items || { ...cleanRule, required: false }
+  };
+};
+var resolveTableColumns = (c, params) => {
+  const schema = params.schema || "public";
+  const key = `${schema}.${params.table}`;
+  const envRecord = c.env;
+  const fromContext = c.var?.dbTables || envRecord.dbTables || {};
+  if (fromContext[key])
+    return fromContext[key] || {};
+  const fromParams = params.dbTables;
+  if (fromParams && typeof fromParams === "object") {
+    const asRecord = fromParams;
+    if (asRecord[key] && typeof asRecord[key] === "object") {
+      return asRecord[key];
+    }
+    const values = Object.values(asRecord);
+    if (values.length && values.every((item) => isPlainObject(item) && ("data_type" in item))) {
+      return asRecord;
+    }
+  }
+  return {};
+};
+var buildPatchFromPost = (post) => {
+  if (!post)
+    return;
+  return Object.entries(post).reduce((acc, [key, value]) => {
+    const rule = { ...value };
+    delete rule.required;
+    if (rule.properties) {
+      rule.properties = Object.entries(rule.properties).reduce((nestedAcc, [nestedKey, nestedRule]) => {
+        const nr = { ...nestedRule };
+        delete nr.required;
+        nestedAcc[nestedKey] = nr;
+        return nestedAcc;
+      }, {});
+    }
+    acc[key] = rule;
+    return acc;
+  }, {});
+};
+var buildCrudValidationSchemaFromTable = (c, params) => {
+  const normalizedParams = normalizeCrudConfig(params);
+  const userIdFieldName = normalizedParams.userIdFieldName || "userId";
+  const columns = resolveTableColumns(c, normalizedParams);
+  const columnEntries = Object.entries(columns);
+  const columnNames = columnEntries.map(([name]) => name);
+  const joinSelectableNames = [
+    ...normalizedParams.join || [],
+    ...normalizedParams.joinOnDemand || []
+  ].flatMap((item) => [item.table, item.alias]).filter((name) => typeof name === "string" && !!name);
+  const joinFieldNames = [
+    ...joinSelectableNames
+  ];
+  const selectableFieldNames = Array.from(new Set([...columnNames, ...joinFieldNames, "-relations"]));
+  const primaryKey = columnEntries.find(([, col]) => col.is_primary_key)?.[0] || (columns.id ? "id" : columnNames[0]);
+  const readOnly = normalizedParams.readOnlyFields || DEFAULT_READONLY_FIELDS2;
+  const paramsSchema = {};
+  if (primaryKey && columns[primaryKey]) {
+    paramsSchema[primaryKey] = {
+      ...getColumnValidationRule(columns[primaryKey]),
+      required: true
+    };
+  }
+  const querySchema = {
+    _sort: {
+      type: "array",
+      preprocess: splitSortFields,
+      items: {
+        type: "enum",
+        enum: [...columnNames, "random()"]
+      }
+    },
+    _limit: { type: "number" },
+    _page: { type: "number" },
+    _skip: { type: "number" },
+    _after: { type: ["string", "number", "date"] },
+    _unlimited: { type: "boolean" },
+    _fields: {
+      type: "array",
+      preprocess: splitCsv,
+      items: {
+        type: "enum",
+        enum: selectableFieldNames
+      }
+    },
+    _join: {
+      type: "array",
+      preprocess: splitCsv,
+      items: {
+        type: "enum",
+        enum: Array.from(new Set((normalizedParams.joinOnDemand || []).flatMap((item) => [item.table, item.alias]).filter((name) => typeof name === "string" && !!name)))
+      }
+    },
+    _lang: { type: "string" },
+    _search: { type: "string" }
+  };
+  for (const [name, column] of columnEntries) {
+    const rule = getColumnValidationRule(column);
+    querySchema[name] = withArrayAlternative(rule);
+    if (rule.type === "string" || Array.isArray(rule.type) && rule.type.includes("string")) {
+      querySchema[`${name}~`] = { type: "string" };
+    }
+    if (column.is_nullable === "YES") {
+      querySchema[`_null_${name}`] = { type: "boolean" };
+      querySchema[`_not_null_${name}`] = { type: "boolean" };
+    }
+    if (rule.type !== "boolean") {
+      querySchema[`_from_${name}`] = rule;
+      querySchema[`_to_${name}`] = rule;
+      querySchema[`_in_${name}`] = {
+        type: "array",
+        preprocess: parseJsonArray,
+        items: { ...rule, required: false }
+      };
+      querySchema[`_not_in_${name}`] = {
+        type: "array",
+        preprocess: parseJsonArray,
+        items: { ...rule, required: false }
+      };
+    }
+    querySchema[`${name}!`] = withArrayAlternative(rule);
+  }
+  const bodyPost = {};
+  for (const [name, column] of columnEntries) {
+    if (readOnly.includes(name))
+      continue;
+    const required = name !== userIdFieldName && column.is_nullable === "NO" && (column.column_default === null || typeof column.column_default === "undefined");
+    bodyPost[name] = getColumnValidationRule(column, { required });
+  }
+  const bodyPatch = buildPatchFromPost(bodyPost);
+  return {
+    params: paramsSchema,
+    query: querySchema,
+    headers: {
+      authorization: { type: "string" }
+    },
+    body: {
+      post: bodyPost,
+      patch: bodyPatch
+    }
+  };
+};
+var mergeValidationSection = (generated, custom) => {
+  if (typeof custom === "undefined")
+    return generated;
+  if (isEmptyPlainObject(custom))
+    return null;
+  if (isValidationResolver(custom))
+    return custom;
+  return {
+    ...generated || {},
+    ...custom || {}
+  };
+};
+var mergeValidationConfig = (generated, custom) => {
+  if (typeof custom === "undefined") {
+    return {
+      disabledAll: false,
+      params: generated.params,
+      query: generated.query,
+      headers: generated.headers,
+      body: generated.body
+    };
+  }
+  if (isEmptyPlainObject(custom)) {
+    return { disabledAll: true };
+  }
+  const mergedPost = mergeValidationSection(generated.body?.post, custom.body?.post);
+  let mergedPatch = mergeValidationSection(generated.body?.patch, custom.body?.patch);
+  if (typeof custom.body?.patch === "undefined" && isPlainObject(mergedPost)) {
+    mergedPatch = buildPatchFromPost(mergedPost);
+  }
+  if (isEmptyPlainObject(custom.body)) {
+    return {
+      disabledAll: false,
+      params: mergeValidationSection(generated.params, custom.params),
+      query: mergeValidationSection(generated.query, custom.query),
+      headers: mergeValidationSection(generated.headers, custom.headers),
+      body: {
+        post: null,
+        patch: null
+      }
+    };
+  }
+  return {
+    disabledAll: false,
+    params: mergeValidationSection(generated.params, custom.params),
+    query: mergeValidationSection(generated.query, custom.query),
+    headers: mergeValidationSection(generated.headers, custom.headers),
+    body: {
+      post: mergedPost,
+      patch: mergedPatch
+    }
+  };
+};
+var mapExternalIssues = (issues, section) => {
+  return issues.map((issue) => {
+    const record = issue || {};
+    const pathArr = Array.isArray(record.path) ? record.path : [];
+    const path = pathArr.map((part) => String(part)).join(".");
+    const message = typeof record.message === "string" ? record.message : "Validation failed";
+    const expected = isPlainObject(record.expected) ? record.expected : { type: "external" };
+    const value = typeof record.input !== "undefined" ? record.input : typeof record.received !== "undefined" ? record.received : null;
+    return {
+      field: path ? `${section}.${path}` : section,
+      message,
+      expected,
+      value
+    };
+  });
+};
+var runExternalValidator = async (validator, value, section) => {
+  const v = validator;
+  if (v && typeof v.safeParse === "function") {
+    const result = await v.safeParse(value);
+    const r = result;
+    if (r?.success === true)
+      return [];
+    const issues = r?.error?.issues || [];
+    return mapExternalIssues(issues, section);
+  }
+  if (v && typeof v.parse === "function") {
+    try {
+      await v.parse(value);
+      return [];
+    } catch (err) {
+      const issues = err?.issues || [];
+      if (issues.length)
+        return mapExternalIssues(issues, section);
+      return [{
+        field: section,
+        message: err instanceof Error ? err.message : "Validation failed",
+        expected: { type: "external" },
+        value
+      }];
+    }
+  }
+  if (v && typeof v.validate === "function") {
+    try {
+      const result = await v.validate(value);
+      if (result === true || typeof result === "undefined")
+        return [];
+      if (Array.isArray(result)) {
+        return withSectionPrefix(section, result);
+      }
+      if (isPlainObject(result) && Array.isArray(result.errors)) {
+        return withSectionPrefix(section, result.errors);
+      }
+      if (result === false) {
+        return [{
+          field: section,
+          message: "Validation failed",
+          expected: { type: "external" },
+          value
+        }];
+      }
+      return [];
+    } catch (err) {
+      return [{
+        field: section,
+        message: err instanceof Error ? err.message : "Validation failed",
+        expected: { type: "external" },
+        value
+      }];
+    }
+  }
+  return [];
+};
+var resolveRuntimeSection = async (section, c, sectionName) => {
+  if (!section)
+    return {};
+  if (isValidationResolver(section)) {
+    const resolved = await section(c, async () => {});
+    if (!resolved)
+      return {};
+    if (Array.isArray(resolved)) {
+      return { errors: withSectionPrefix(sectionName, resolved) };
+    }
+    if (isPlainObject(resolved) && Array.isArray(resolved.errors)) {
+      return {
+        errors: withSectionPrefix(sectionName, resolved.errors || [])
+      };
+    }
+    if (isPlainObject(resolved) && (typeof resolved.safeParse === "function" || typeof resolved.parse === "function" || typeof resolved.validate === "function")) {
+      return { externalValidator: resolved };
+    }
+    if (isPlainObject(resolved)) {
+      return { schema: resolved };
+    }
+    return {};
+  }
+  return { schema: section };
+};
+var getQueryData = (c) => {
+  if (c.var?.query && typeof c.var.query === "object") {
+    return { ...c.var.query };
+  }
+  return {};
+};
+var getHeaderData = (c) => {
+  const headers = {};
+  c.req.raw.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+  return headers;
+};
+var setValidationError = (c, issues) => {
+  const getErr = c.get("getErrorByMessage");
+  const errObj = getErr?.("VALIDATION_ERROR") || DEFAULT_VALIDATION_ERROR;
+  c.status(errObj.status || 400);
+  c.set("result", {
+    ...errObj,
+    name: "VALIDATION_ERROR",
+    additional: issues,
+    error: true
+  });
+};
+var validateActionSections = async (c, action, merged) => {
+  const errors = [];
+  const paramsData = c.req.param();
+  let bodyData;
+  let bodyLoaded = false;
+  const ensureBody = async () => {
+    if (bodyLoaded) {
+      return bodyData && typeof bodyData === "object" ? bodyData : {};
+    }
+    bodyLoaded = true;
+    bodyData = c.var?.body;
+    if (!bodyData || typeof bodyData !== "object") {
+      bodyData = {};
+    }
+    return bodyData;
+  };
+  const run = async (sectionName, section, data) => {
+    if (!section)
+      return;
+    const runtime = await resolveRuntimeSection(section, c, sectionName);
+    if (runtime.errors?.length) {
+      errors.push(...runtime.errors);
+      return;
+    }
+    if (runtime.externalValidator) {
+      errors.push(...await runExternalValidator(runtime.externalValidator, data, sectionName));
+      return;
+    }
+    if (runtime.schema) {
+      errors.push(...validateDataBySchema(data, runtime.schema, sectionName));
+    }
+  };
+  if (action === "get") {
+    if (Object.keys(paramsData).length) {
+      await run("params", merged.params, paramsData);
+    }
+    await run("query", merged.query, getQueryData(c));
+    await run("headers", merged.headers, getHeaderData(c));
+    return errors;
+  }
+  if (action === "post") {
+    await run("headers", merged.headers, getHeaderData(c));
+    await run("body", merged.body?.post, await ensureBody());
+    return errors;
+  }
+  if (action === "patch") {
+    await run("params", merged.params, paramsData);
+    await run("headers", merged.headers, getHeaderData(c));
+    await run("body", merged.body?.patch, await ensureBody());
+    return errors;
+  }
+  await run("params", merged.params, paramsData);
+  await run("headers", merged.headers, getHeaderData(c));
+  return errors;
+};
+var createCrudValidationMiddleware = (params) => {
+  return (action) => async (c, next) => {
+    const generated = buildCrudValidationSchemaFromTable(c, params);
+    const merged = mergeValidationConfig(generated, params.validation);
+    if (merged.disabledAll) {
+      await next();
+      return;
+    }
+    const issues = await validateActionSections(c, action, merged);
+    if (issues.length) {
+      setValidationError(c, issues);
+      return;
+    }
+    await next();
+  };
+};
+
+// src/Routings.ts
 var factory = createFactory();
 
 class Routings {
@@ -783,7 +1636,9 @@ class Routings {
   routesPermissions = {};
   routesErrors = {};
   routesEmailTemplates = {};
+  crudPermissionsMeta = [];
   migrationDirs;
+  pathPrefix = "";
   constructor(options) {
     if (options?.migrationDirs)
       this.migrationDirs = options.migrationDirs;
@@ -794,63 +1649,97 @@ class Routings {
       this.routes.push({ path, method, handlers });
     }
   }
-  get(path, ...fnArr) {
+  prefix(path) {
+    this.pathPrefix = path;
+    return this;
+  }
+  get(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "GET", path, fnArr });
+    return this;
   }
-  post(path, ...fnArr) {
+  post(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "POST", path, fnArr });
+    return this;
   }
-  patch(path, ...fnArr) {
+  patch(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "PATCH", path, fnArr });
+    return this;
   }
-  put(path, ...fnArr) {
-    this.pushToRoutes({ method: "PUT", path, fnArr });
-  }
-  delete(path, ...fnArr) {
+  delete(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ method: "DELETE", path, fnArr });
+    return this;
   }
-  use(path, ...fnArr) {
+  use(p, ...fnArr) {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, "/");
     this.pushToRoutes({ path, fnArr });
+    return this;
   }
   all(...fnArr) {
-    this.pushToRoutes({ path: "*", fnArr });
+    const path = `${this.pathPrefix}*`.replace(/^\/+/g, "/");
+    this.pushToRoutes({ path, fnArr });
+    return this;
   }
   crud(params) {
-    const { prefix, table, permissions } = params;
+    const normalizedParams = normalizeCrudConfig(params);
+    const { prefix, table, permissions } = normalizedParams;
     const p = `/${prefix || table}`.replace(/^\/+/, "/");
-    this.get(`${p}`, async (c) => {
-      const cb = new CrudBuilder(params);
+    const permissionPrefix = p.replace(/^\//, "");
+    const methods = permissions?.methods || permissions?.protectedMethods;
+    const methodsConfigured = Array.isArray(methods);
+    const hasExplicitOwnerPermissions = !!normalizedParams.permissions?.owner?.length;
+    const validate = createCrudValidationMiddleware(normalizedParams);
+    const createCrudBuilder = (c) => {
+      const cb = new CrudBuilder(normalizedParams);
+      if (hasExplicitOwnerPermissions)
+        return cb;
+      const roles = c.var.roles;
+      if (!roles || typeof roles.getPermissions !== "function")
+        return cb;
+      const ownerPermissions = roles.getPermissions(["owner"]);
+      if (!ownerPermissions || typeof ownerPermissions !== "object")
+        return cb;
+      cb.ownerPermissions = ownerPermissions;
+      return cb;
+    };
+    this.get(`${p}`, validate("get"), async (c) => {
+      const cb = createCrudBuilder(c);
       await cb.get(c);
     });
-    this.post(`${p}`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.post(`${p}`, validate("post"), async (c) => {
+      const cb = createCrudBuilder(c);
       await cb.add(c);
     });
-    this.get(`${p}/:id`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.get(`${p}/:id`, validate("get"), async (c) => {
+      const cb = createCrudBuilder(c);
       await cb.getById(c);
     });
-    this.put(`${p}/:id`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.patch(`${p}/:id`, validate("patch"), async (c) => {
+      const cb = createCrudBuilder(c);
       await cb.update(c);
     });
-    this.patch(`${p}/:id`, async (c) => {
-      const cb = new CrudBuilder(params);
-      await cb.update(c);
-    });
-    this.delete(`${p}/:id`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.delete(`${p}/:id`, validate("delete"), async (c) => {
+      const cb = createCrudBuilder(c);
       await cb.delete(c);
     });
-    if (permissions?.protectedMethods) {
+    this.crudPermissionsMeta.push({
+      path: `${this.pathPrefix}${p}`,
+      permissionPrefix,
+      methodsConfigured,
+      tableName: table
+    });
+    if (methods?.length) {
       const register = (path, method) => {
         const key = `${method} ${path}`;
         if (!this.routesPermissions[key])
           this.routesPermissions[key] = [];
-        this.routesPermissions[key].push(`${p.replace(/^\//, "")}.${method.toLowerCase()}`);
+        this.routesPermissions[key].push(`${permissionPrefix}.${method.toLowerCase()}`);
       };
-      const methods = permissions.protectedMethods[0] === "*" ? ["GET", "POST", "PUT", "PATCH", "DELETE"] : permissions.protectedMethods;
-      for (const method of methods) {
+      const protectedMethods = methods[0] === "*" ? ["GET", "POST", "PATCH", "DELETE"] : methods;
+      for (const method of protectedMethods) {
         if (method === "POST" || method === "GET")
           register(p, method);
         if (method !== "POST")
@@ -861,10 +1750,10 @@ class Routings {
   errors(err) {
     const errArr = Array.isArray(err) ? err : [err];
     for (const e of errArr)
-      this.routesErrors = { ...this.routesErrors, ...e };
+      Object.assign(this.routesErrors, e);
   }
   emailTemplates(template) {
-    this.routesEmailTemplates = { ...this.routesEmailTemplates, ...template };
+    Object.assign(this.routesEmailTemplates, template);
   }
 }
 export {

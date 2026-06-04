@@ -134,6 +134,16 @@ export type MockContextResult = {
 };
 
 export function createMockContext(opts: MockContextOptions = {}): MockContextResult {
+  const normalizedQuery: Record<string, string | string[]> = {};
+
+  for (const [key, value] of Object.entries(opts.query || {})) {
+    normalizedQuery[key] = value;
+  }
+
+  for (const [key, value] of Object.entries(opts.queries || {})) {
+    normalizedQuery[key] = value;
+  }
+
   const db = createMockKnex({
     queryResult: opts.queryResult || [],
     countResult: opts.countResult || 0,
@@ -146,8 +156,14 @@ export function createMockContext(opts: MockContextOptions = {}): MockContextRes
 
   const c = {
     req: {
-      query: () => opts.query || {},
-      queries: () => opts.queries || {},
+      query: () => Object.entries(normalizedQuery).reduce((acc: Record<string, string>, [key, value]) => {
+        acc[key] = Array.isArray(value) ? String(value[0] ?? '') : String(value);
+        return acc;
+      }, {}),
+      queries: () => Object.entries(normalizedQuery).reduce((acc: Record<string, string[]>, [key, value]) => {
+        acc[key] = Array.isArray(value) ? value.map(String) : [String(value)];
+        return acc;
+      }, {}),
       param: () => opts.params || {},
       json: async () => opts.body || {},
     },
@@ -162,6 +178,8 @@ export function createMockContext(opts: MockContextOptions = {}): MockContextRes
       dbWrite: dbWrite.knex,
       dbTables: opts.dbTables || {},
       roles: opts.roles,
+      query: normalizedQuery,
+      body: opts.body,
       user: opts.user,
     } satisfies VarBindings as VarBindings,
     set: (key: string, value: unknown) => { store[key] = value; },

@@ -2,6 +2,7 @@ import { createFactory } from 'hono/factory';
 import CrudBuilder from './CrudBuilder';
 import type {
   AppContext,
+  CrudPermissionMeta,
   CrudBuilderOptionsType,
   MethodsType,
   MiddlewareHandler,
@@ -11,6 +12,8 @@ import type {
   RoutesType,
   RoutingsOptionsType,
 } from './types';
+import { normalizeCrudConfig } from './crudConfig';
+import { createCrudValidationMiddleware } from './Validatior';
 
 const factory = createFactory();
 
@@ -19,7 +22,9 @@ export class Routings {
   routesPermissions: Record<string, string[]> = {};
   routesErrors: RoutesErrorsType = {};
   routesEmailTemplates: RoutesEmailTemplatesType = {};
+  crudPermissionsMeta: CrudPermissionMeta[] = [];
   migrationDirs: string[] | undefined;
+  private pathPrefix = '';
 
   constructor(options?: RoutingsOptionsType) {
     if (options?.migrationDirs) this.migrationDirs = options.migrationDirs;
@@ -32,67 +37,111 @@ export class Routings {
     }
   }
 
-  get(path: string, ...fnArr: MiddlewareHandler[]): void {
+  prefix(path: string): Routings {
+    this.pathPrefix = path;
+    return this;
+  }
+
+  get(p: string, ...fnArr: MiddlewareHandler[]): Routings {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, '/');
     this.pushToRoutes({ method: 'GET', path, fnArr });
+    return this;
   }
 
-  post(path: string, ...fnArr: MiddlewareHandler[]): void {
+  post(p: string, ...fnArr: MiddlewareHandler[]): Routings {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, '/');
     this.pushToRoutes({ method: 'POST', path, fnArr });
+    return this;
   }
 
-  patch(path: string, ...fnArr: MiddlewareHandler[]): void {
+  patch(p: string, ...fnArr: MiddlewareHandler[]): Routings {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, '/');
     this.pushToRoutes({ method: 'PATCH', path, fnArr });
+    return this;
   }
 
-  delete(path: string, ...fnArr: MiddlewareHandler[]): void {
+  delete(p: string, ...fnArr: MiddlewareHandler[]): Routings {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, '/');
     this.pushToRoutes({ method: 'DELETE', path, fnArr });
+    return this;
   }
 
-  use(path: string, ...fnArr: MiddlewareHandler[]): void {
+  use(p: string, ...fnArr: MiddlewareHandler[]): Routings {
+    const path = `${this.pathPrefix}${p}`.replace(/^\/+/g, '/');
     this.pushToRoutes({ path, fnArr });
+    return this;
   }
 
-  all(...fnArr: MiddlewareHandler[]): void {
-    this.pushToRoutes({ path: '*', fnArr });
+  all(...fnArr: MiddlewareHandler[]): Routings {
+    const path = `${this.pathPrefix}*`.replace(/^\/+/g, '/');
+    this.pushToRoutes({ path, fnArr });
+    return this;
   }
 
   crud(params: CrudBuilderOptionsType): void {
-    const { prefix, table, permissions } = params;
+    const normalizedParams = normalizeCrudConfig(params);
+    const { prefix, table, permissions } = normalizedParams;
     const p = `/${prefix || table}`.replace(/^\/+/, '/');
+    const permissionPrefix = p.replace(/^\//, '');
+    const methods = permissions?.methods || permissions?.protectedMethods;
+    const methodsConfigured = Array.isArray(methods);
+    const hasExplicitOwnerPermissions = !!normalizedParams.permissions?.owner?.length;
 
-    this.get(`${p}`, async (c) => {
-      const cb = new CrudBuilder(params);
+    const validate = createCrudValidationMiddleware(normalizedParams);
+    const createCrudBuilder = (c: AppContext): CrudBuilder => {
+      const cb = new CrudBuilder(normalizedParams);
+      if (hasExplicitOwnerPermissions) return cb;
+
+      const roles = c.var.roles;
+      if (!roles || typeof roles.getPermissions !== 'function') return cb;
+
+      const ownerPermissions = roles.getPermissions(['owner']);
+      if (!ownerPermissions || typeof ownerPermissions !== 'object') return cb;
+
+      (cb as unknown as { ownerPermissions: Record<string, boolean> }).ownerPermissions = ownerPermissions;
+      return cb;
+    };
+
+    this.get(`${p}`, validate('get') as never, async (c) => {
+      const cb = createCrudBuilder(c as AppContext);
       await cb.get(c as AppContext);
     });
-    this.post(`${p}`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.post(`${p}`, validate('post') as never, async (c) => {
+      const cb = createCrudBuilder(c as AppContext);
       await cb.add(c as AppContext);
     });
-    this.get(`${p}/:id`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.get(`${p}/:id`, validate('get') as never, async (c) => {
+      const cb = createCrudBuilder(c as AppContext);
       await cb.getById(c as AppContext);
     });
-    this.patch(`${p}/:id`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.patch(`${p}/:id`, validate('patch') as never, async (c) => {
+      const cb = createCrudBuilder(c as AppContext);
       await cb.update(c as AppContext);
     });
-    this.delete(`${p}/:id`, async (c) => {
-      const cb = new CrudBuilder(params);
+    this.delete(`${p}/:id`, validate('delete') as never, async (c) => {
+      const cb = createCrudBuilder(c as AppContext);
       await cb.delete(c as AppContext);
     });
 
-    if (permissions?.protectedMethods) {
+    this.crudPermissionsMeta.push({
+      path: `${this.pathPrefix}${p}`,
+      permissionPrefix,
+      methodsConfigured,
+      tableName: table,
+    });
+
+    if (methods?.length) {
       const register = (path: string, method: string): void => {
         const key = `${method} ${path}`;
         if (!this.routesPermissions[key]) this.routesPermissions[key] = [];
-        this.routesPermissions[key].push(`${p.replace(/^\//, '')}.${method.toLowerCase()}`);
+        this.routesPermissions[key].push(`${permissionPrefix}.${method.toLowerCase()}`);
       };
 
-      const methods: MethodsType[] = permissions.protectedMethods[0] === '*'
+      const protectedMethods: MethodsType[] = methods[0] === '*'
         ? ['GET', 'POST', 'PATCH', 'DELETE']
-        : (permissions.protectedMethods as MethodsType[]);
+        : (methods as MethodsType[]);
 
-      for (const method of methods) {
+      for (const method of protectedMethods) {
         if (method === 'POST' || method === 'GET') register(p, method);
         if (method !== 'POST') register(`${p}/:id`, method);
       }
@@ -101,10 +150,10 @@ export class Routings {
 
   errors(err: RoutesErrorsType | RoutesErrorsType[]): void {
     const errArr = Array.isArray(err) ? err : [err];
-    for (const e of errArr) this.routesErrors = { ...this.routesErrors, ...e };
+    for (const e of errArr) Object.assign(this.routesErrors, e);
   }
 
   emailTemplates(template: RoutesEmailTemplatesType): void {
-    this.routesEmailTemplates = { ...this.routesEmailTemplates, ...template };
+    Object.assign(this.routesEmailTemplates, template);
   }
 }

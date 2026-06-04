@@ -42,7 +42,12 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     private getDbWriteFromContext;
     private getDbTablesFromContext;
     private getRolesFromContext;
+    private getCurrentUserId;
     private getDbWithSchema;
+    private getNormalizedQuery;
+    private getSingleValueQuery;
+    private getQueryArrays;
+    private getRequestBody;
     private getKnownColumnNames;
     private isValidSortField;
     private isValidWhereKey;
@@ -55,6 +60,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     private getHiddenFields;
     private deleteHiddenFieldsFromResult;
     private filterDataByTableColumns;
+    private normalizeWriteValue;
     private updateData;
     private updateIncomingData;
     optionsGet(): {

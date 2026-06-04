@@ -42,6 +42,11 @@ const router = new Routings();
 
 router.crud({ table: 'users' });
 router.crud({ table: 'posts', prefix: 'api/posts' });
+router
+  .prefix('/ships')
+  .get('/:id/similar', getSimilarShips)
+  .get('/:id/requests', getRequests)
+  .post('/import', importShip);
 
 // pass router to the-api
 const app = new TheAPI({ routings: [router] });
@@ -105,7 +110,7 @@ GET /users?_from_age=18&_to_age=65       — range (>= and <=)
 | Param | Example | Description |
 |---|---|---|
 | `_search` | `?_search=john` | Trigram search (requires `pg_trgm`) |
-| `_lang` | `?_lang=de` | Translate fields via `langs` table |
+| `_lang` | `?_lang=de` | Translate fields via `dict` table |
 
 ## Routings API
 
@@ -122,6 +127,51 @@ router.delete('/items/:id', async (c) => { /* ... */ });
 // Middleware for all routes
 router.use('/api/*', corsMiddleware);
 router.all(loggerMiddleware);
+```
+
+### prefix(path)
+
+Use `prefix()` to set a base path for the next route registrations and keep chaining:
+
+```typescript
+router
+  .prefix('/ships')
+  .get('/:id/similar', getSimilarShips)
+  .get('/:id/requests', getRequests)
+  .post('/import', importShip)
+  .post('/0', parseShip)
+  .post('/0/countries', guessCountryByName);
+```
+
+It is equivalent to:
+
+```typescript
+router.get('/ships/:id/similar', getSimilarShips);
+router.get('/ships/:id/requests', getRequests);
+router.post('/ships/import', importShip);
+router.post('/ships/0', parseShip);
+router.post('/ships/0/countries', guessCountryByName);
+```
+
+Calling `prefix()` again switches the current base path:
+
+```typescript
+router
+  .prefix('/v1')
+  .get('/users', getUsersV1)
+  .prefix('/v2')
+  .get('/users', getUsersV2);
+```
+
+`crud()` also respects the current prefix:
+
+```typescript
+router.prefix('/api/v1').crud({ table: 'posts' });
+// GET    /api/v1/posts
+// POST   /api/v1/posts
+// GET    /api/v1/posts/:id
+// PATCH  /api/v1/posts/:id
+// DELETE /api/v1/posts/:id
 ```
 
 ### crud(options)
@@ -176,7 +226,8 @@ router.crud({
 
   // permissions
   permissions: {
-    protectedMethods: ['POST', 'PATCH', 'DELETE'],
+    methods: ['POST', 'PATCH', 'DELETE'], // preferred
+    // protectedMethods: ['POST', 'PATCH', 'DELETE'], // legacy alias
     owner: ['posts.view_private'],
     fields: {
       viewable: {
@@ -262,7 +313,7 @@ join: [{
   alias: 'isLiked',
   field: `EXISTS(SELECT 1 FROM "likes" WHERE "likes"."postId" = "posts"."id" AND "likes"."userId" = :userId)::bool`,
   where: '1=1',
-  whereBindings: { userId: 'env.user.id' },
+  whereBindings: { userId: 'env.user.userId' },
 }]
 ```
 
@@ -389,7 +440,7 @@ router.get('/my-posts', async (c) => {
   const { result, meta } = await crud.getRequestResult(c, {
     _limit: ['5'],
     _sort: ['-timeCreated'],
-    userId: [c.var.user.id],
+    userId: [c.var.user.userId],
   });
   c.set('result', result);
   c.set('meta', meta);

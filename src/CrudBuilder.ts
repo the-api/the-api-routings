@@ -59,6 +59,50 @@ const toPositiveInt = (value: unknown, fallback: number): number => {
 const toActionFlags = (input?: CrudAction[]): ActionFlags =>
   (input || []).reduce<ActionFlags>((acc, cur) => ({ ...acc, [cur]: true }), {});
 
+const isNumericDbType = (dataType: unknown): boolean => {
+  const dt = String(dataType || '').toLowerCase();
+  if ([
+    'integer',
+    'int',
+    'int2',
+    'int4',
+    'int8',
+    'smallint',
+    'bigint',
+    'numeric',
+    'decimal',
+    'real',
+    'double precision',
+    'float',
+    'serial',
+    'bigserial',
+    'smallserial',
+  ].includes(dt)) return true;
+
+  return /^(numeric|decimal|float)\b/.test(dt);
+};
+
+const isIntegerDbType = (dataType: unknown): boolean => {
+  const dt = String(dataType || '').toLowerCase();
+  return [
+    'integer',
+    'int',
+    'int2',
+    'int4',
+    'int8',
+    'smallint',
+    'bigint',
+    'serial',
+    'bigserial',
+    'smallserial',
+  ].includes(dt);
+};
+
+const isDateDbType = (dataType: unknown): boolean => {
+  const dt = String(dataType || '').toLowerCase();
+  return dt.includes('date') || dt.includes('timestamp') || dt.includes('time');
+};
+
 // -- Class --------------------------------------------------
 
 export default class CrudBuilder<T extends Record<string, unknown> = Record<string, unknown>> {
@@ -181,10 +225,56 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     return (c.var?.roles || c.env?.roles) as RequestState['roles'];
   }
 
+  private getCurrentUserId(): UserType['userId'] | undefined {
+    return this.state.user?.userId ?? this.state.user?.id;
+  }
+
   private getDbWithSchema(db: Knex): Knex.QueryBuilder {
     const qb = db(this.table);
     if (this.schema) qb.withSchema(this.schema);
     return qb;
+  }
+
+  private getNormalizedQuery(c: AppContext): Record<string, string | string[]> {
+    const query = c.var?.query;
+
+    if (query && typeof query === 'object' && !Array.isArray(query)) {
+      return { ...(query as Record<string, string | string[]>) };
+    }
+
+    return {};
+  }
+
+  private getSingleValueQuery(c: AppContext): Record<string, string> {
+    return Object.entries(this.getNormalizedQuery(c)).reduce(
+      (acc: Record<string, string>, [key, value]) => {
+        acc[key] = Array.isArray(value) ? String(value[0] ?? '') : String(value);
+        return acc;
+      },
+      {},
+    );
+  }
+
+  private getQueryArrays(
+    c: AppContext,
+    q?: Record<string, string[]>,
+  ): Record<string, string[]> {
+    if (q) return q;
+
+    return Object.entries(this.getNormalizedQuery(c)).reduce(
+      (acc: Record<string, string[]>, [key, value]) => {
+        acc[key] = Array.isArray(value) ? value.map(String) : [String(value)];
+        return acc;
+      },
+      {},
+    );
+  }
+
+  private async getRequestBody(c: AppContext): Promise<unknown> {
+    const body = c.var?.body;
+    if (Array.isArray(body)) return body;
+    if (body && typeof body === 'object') return body;
+    return {};
   }
 
   // -- FIX: SQL Injection - validate sort fields -----------
@@ -379,13 +469,13 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || '').replace(/(^|,)-/g, ',').split(',').filter(Boolean);
-        this.state.res.distinct(
-          !f
-            ? []
-            : sortArr
-                .map((item) => !f.includes(item) && `${this.table}.${item}`)
-                .filter(Boolean),
-        );
+        const selectedFields = f;
+        const distinctColumns = selectedFields
+          ? sortArr
+              .filter((item) => !selectedFields.includes(item))
+              .map((item) => `${this.table}.${item}`)
+          : [];
+        this.state.res.distinct(distinctColumns);
       }
     }
 
@@ -406,8 +496,11 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     }
 
     if (f) {
-      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
-      f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
+      const selectedFields = f;
+      join = join.filter(({ table, alias }) =>
+        selectedFields.includes(table) || (alias ? selectedFields.includes(alias) : false),
+      );
+      f = selectedFields.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
 
     let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);
@@ -431,8 +524,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     if (this.state.lang && this.state.lang !== 'en') {
       for (const field of this.translate) {
         this.state.langJoin[field] = `COALESCE( (
-          select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
+          select text from dict where lang=:lang and "textKey" = any(
+            select "textKey" from dict where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
         joinCoalesce.push(
           db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }) as unknown as string,
@@ -462,7 +555,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : '';
       const limitStr = limit ? `LIMIT ${limit}` : '';
-      const lang = table === 'lang' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
+      const lang = table === 'dict' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
       const ff = joinFields?.map((item) =>
         typeof item === 'string'
           ? `'${item}', "${as || table}"."${item}"`
@@ -471,6 +564,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       const f2 = ff ? `json_build_object(${ff.join(', ')})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
       const wb: Record<string, unknown> = {};
+      const flatQuery = this.getSingleValueQuery(c);
 
       if (whereBindings) {
         const envAll = {
@@ -483,7 +577,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
         const dd: Record<string, unknown> = flattening({
           env: envAll,
           params: c.req.param(),
-          query: c.req.query(),
+          query: flatQuery,
         }) as Record<string, unknown>;
         for (const [k, v] of Object.entries(whereBindings)) {
           wb[k] = dd[v] ?? null;
@@ -527,7 +621,9 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       joinCoalesce.push(db.raw(sqlToJoin, wb) as unknown as string);
     }
 
-    if (c.req.query()._search && this.searchFields.length) {
+    const flatQuery = this.getSingleValueQuery(c);
+
+    if (flatQuery._search && this.searchFields.length) {
       const searchColumnsStr = this.searchFields
         .map((name) => {
           const searchName = this.state.langJoin[name] || `"${name}"`;
@@ -537,7 +633,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       joinCoalesce.push(
         db.raw(
           `(${searchColumnsStr})/${this.searchFields.length} as _search_distance`,
-          { ...c.req.query(), lang: this.state.lang },
+          { ...flatQuery, lang: this.state.lang },
         ) as unknown as string,
       );
       if (!_sort) this.state.res.orderBy('_search_distance', 'ASC');
@@ -594,7 +690,11 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     hiddenFields: HiddenFieldsResult,
   ): void {
     if (!result || !hiddenFields) return;
-    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const currentUserId = this.getCurrentUserId();
+    const resultUserId = result[this.userIdFieldName];
+    const isOwner = currentUserId != null
+      && resultUserId != null
+      && String(resultUserId) === String(currentUserId);
     const fields = hiddenFields[isOwner ? 'owner' : 'regular'];
     for (const key of fields) delete result[key];
   }
@@ -608,10 +708,22 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const filtered: Record<string, unknown> = {};
     for (const key of Object.keys(data)) {
       if (rows[key] && !this.readOnlyFields.includes(key)) {
-        filtered[key] = data[key];
+        filtered[key] = this.normalizeWriteValue(data[key], rows[key]);
       }
     }
     return filtered;
+  }
+
+  private normalizeWriteValue(value: unknown, column: ColumnInfoMap[string]): unknown {
+    if (
+      value === ''
+      && column.is_nullable === 'YES'
+      && (isNumericDbType(column.data_type) || isDateDbType(column.data_type))
+    ) {
+      return null;
+    }
+
+    return value;
   }
 
   private updateData(
@@ -627,9 +739,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     // FIX: removed `result = { ...c.req.param(), ...result }` - URL params must not merge into data
     const filtered = this.filterDataByTableColumns(data, rows);
 
-    const userIdField = this.userIdFieldName;
-    if (rows[userIdField] && this.state.user?.id) {
-      filtered[userIdField] = this.state.user.id;
+    if (rows[this.userIdFieldName] && this.state.user) {
+      filtered[this.userIdFieldName] = this.getCurrentUserId();
     }
 
     return filtered;
@@ -770,7 +881,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.initState(c);
     const db = this.getDbFromContext(c);
 
-    const queries = q || c.req.queries();
+    const queries = this.getQueryArrays(c, q);
     const queriesFlat: Record<string, string | string[]> = {};
     for (const [name, value] of Object.entries(queries)) {
       queriesFlat[name] = value?.length === 1 ? value[0] : value;
@@ -897,7 +1008,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const db = this.getDbFromContext(c);
     const { id } = c.req.param();
 
-    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+    const { _fields, _lang, _join, ...whereWithParams } = this.getSingleValueQuery(c);
 
     // FIX: validate user-supplied WHERE keys
     const where: Record<string, string> = {};
@@ -942,7 +1053,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.initState(c);
 
     // FIX: use Array.isArray instead of heuristic detection
-    const body = await c.req.json();
+    const body = await this.getRequestBody(c);
     const data = this.updateIncomingData(c, body as Record<string, unknown> | Record<string, unknown>[]);
 
     const validatedData = Array.isArray(data)
@@ -958,11 +1069,16 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
   }
 
   private validateIntegerFields(data: Record<string, unknown>): Record<string, unknown> {
+    const rows = this.state?.rows || this.dbTables;
     for (const key of Object.keys(data)) {
-      const isInt = this.dbTables?.[key]?.data_type === 'integer';
+      const isInt = isIntegerDbType(rows[key]?.data_type);
       const hasNaN = ([] as unknown[])
         .concat(data[key] as never)
-        .find((item: unknown) => item && Number.isNaN(+(item as string)));
+        .find((item: unknown) =>
+          item !== null
+          && typeof item !== 'undefined'
+          && item !== ''
+          && Number.isNaN(+(item as string)));
       if (isInt && hasNaN) throw new Error('INTEGER_REQUIRED');
       data[key] = data[key] ?? null;
     }
@@ -984,10 +1100,12 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const rows = this.state.rows;
     if (rows.isDeleted) whereClause.isDeleted = false;
 
-    const rawData = await c.req.json();
+    const rawData = await this.getRequestBody(c);
 
     // FIX: filter update data through table columns (same as add)
-    const data = this.filterDataByTableColumns(rawData as Record<string, unknown>, rows);
+    const data = this.validateIntegerFields(
+      this.filterDataByTableColumns(rawData as Record<string, unknown>, rows),
+    );
 
     if (Object.keys(data).length) {
       if (rows.timeUpdated) data.timeUpdated = db.fn.now();

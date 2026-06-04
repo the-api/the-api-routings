@@ -32,7 +32,7 @@
 | **Сортировка** | `_sort=-created,name,random()` |
 | **Выбор полей** | `_fields=id,name` |
 | **JOIN-ы** | `join`, `leftJoin`, `joinOnDemand` (по запросу через `_join`) |
-| **Мультиязычность** | `_lang=de`, COALESCE-подстановка из таблицы `langs` |
+| **Мультиязычность** | `_lang=de`, COALESCE-подстановка из таблицы `dict` |
 | **Полнотекстовый поиск** | `_search` через триграммы PostgreSQL (`%`, `<->`) |
 | **Soft delete** | `isDeleted` + `deletedReplacements` |
 | **Права доступа** | `tokenRequired`, `ownerRequired`, `rootRequired`, `accessByStatuses`, permission-based скрытие полей |
@@ -199,7 +199,7 @@ GET /users?_from_age=18&_to_age=65       — range (>= and <=)
 | Param | Example | Description |
 |---|---|---|
 | `_search` | `?_search=john` | Trigram search (requires `pg_trgm`) |
-| `_lang` | `?_lang=de` | Translate fields via `langs` table |
+| `_lang` | `?_lang=de` | Translate fields via `dict` table |
 
 ## Routings API
 
@@ -357,7 +357,7 @@ join: [{
   alias: 'isLiked',
   field: `EXISTS(SELECT 1 FROM "likes" WHERE "likes"."postId" = "posts"."id" AND "likes"."userId" = :userId)::bool`,
   where: '1=1',
-  whereBindings: { userId: 'env.user.id' },
+  whereBindings: { userId: 'env.user.userId' },
 }]
 ```
 
@@ -484,7 +484,7 @@ router.get('/my-posts', async (c) => {
   const { result, meta } = await crud.getRequestResult(c, {
     _limit: ['5'],
     _sort: ['-timeCreated'],
-    userId: [c.var.user.id],
+    userId: [c.var.user.userId],
   });
   c.set('result', result);
   c.set('meta', meta);
@@ -539,7 +539,8 @@ MIT © [Dimitry Ivanov](https://github.com/ivanoff)
     "lib": ["ESNext", "DOM"],
     "target": "ESNext",
     "module": "ESNext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
+    "rootDir": "./src",
     "declaration": true,
     "declarationMap": true,
     "emitDeclarationOnly": true,
@@ -1107,13 +1108,13 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
       if (this.leftJoinDistinct) {
         const sortArr = (_sort || this.defaultSort || '').replace(/(^|,)-/g, ',').split(',').filter(Boolean);
-        this.state.res.distinct(
-          !f
-            ? []
-            : sortArr
-                .map((item) => !f.includes(item) && `${this.table}.${item}`)
-                .filter(Boolean),
-        );
+        const selectedFields = f;
+        const distinctColumns = selectedFields
+          ? sortArr
+              .filter((item) => !selectedFields.includes(item))
+              .map((item) => `${this.table}.${item}`)
+          : [];
+        this.state.res.distinct(distinctColumns);
       }
     }
 
@@ -1134,8 +1135,11 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     }
 
     if (f) {
-      join = join.filter(({ table, alias }) => f.includes(table) || (alias ? f.includes(alias) : false));
-      f = f.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
+      const selectedFields = f;
+      join = join.filter(({ table, alias }) =>
+        selectedFields.includes(table) || (alias ? selectedFields.includes(alias) : false),
+      );
+      f = selectedFields.filter((name) => !join.find(({ table, alias }) => name === table || name === alias));
     }
 
     let joinCoalesce = (f || Object.keys(this.state.rows)).map((l) => `${this.table}.${l}`);
@@ -1159,8 +1163,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     if (this.state.lang && this.state.lang !== 'en') {
       for (const field of this.translate) {
         this.state.langJoin[field] = `COALESCE( (
-          select text from langs where lang=:lang and "textKey" = any(
-            select "textKey" from langs where lang='en' and text = "${this.table}"."${field}"
+          select text from dict where lang=:lang and "textKey" = any(
+            select "textKey" from dict where lang='en' and text = "${this.table}"."${field}"
           ) limit 1), name )`;
         joinCoalesce.push(
           db.raw(this.state.langJoin[field] + `AS "${field}"`, { lang: this.state.lang }) as unknown as string,
@@ -1190,7 +1194,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
       const orderByStr = orderBy ? `ORDER BY ${orderBy}` : '';
       const limitStr = limit ? `LIMIT ${limit}` : '';
-      const lang = table === 'lang' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
+      const lang = table === 'dict' && this.state.lang?.match(/^\w{2}$/) ? `AND lang='${this.state.lang}'` : '';
       const ff = joinFields?.map((item) =>
         typeof item === 'string'
           ? `'${item}', "${as || table}"."${item}"`
@@ -1208,7 +1212,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
         const dd: Record<string, unknown> = flattening({
           env: envAll,
           params: c.req.param(),
-          query: c.req.query(),
+          query: c.var.query,
         }) as Record<string, unknown>;
         for (const [k, v] of Object.entries(whereBindings)) {
           wb[k] = dd[v] ?? null;
@@ -1252,7 +1256,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       joinCoalesce.push(db.raw(sqlToJoin, wb) as unknown as string);
     }
 
-    if (c.req.query()._search && this.searchFields.length) {
+    if (c.var.query?._search && this.searchFields.length) {
       const searchColumnsStr = this.searchFields
         .map((name) => {
           const searchName = this.state.langJoin[name] || `"${name}"`;
@@ -1262,7 +1266,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       joinCoalesce.push(
         db.raw(
           `(${searchColumnsStr})/${this.searchFields.length} as _search_distance`,
-          { ...c.req.query(), lang: this.state.lang },
+          { ...c.var.query, lang: this.state.lang },
         ) as unknown as string,
       );
       if (!_sort) this.state.res.orderBy('_search_distance', 'ASC');
@@ -1319,7 +1323,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     hiddenFields: HiddenFieldsResult,
   ): void {
     if (!result || !hiddenFields) return;
-    const isOwner = this.state.user?.id && result[this.userIdFieldName] === this.state.user.id;
+    const isOwner = this.state.user?.userId && result[this.userIdFieldName] === this.state.user.userId;
     const fields = hiddenFields[isOwner ? 'owner' : 'regular'];
     for (const key of fields) delete result[key];
   }
@@ -1353,7 +1357,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const filtered = this.filterDataByTableColumns(data, rows);
 
     if (rows.userId && this.state.user) {
-      filtered.userId = this.state.user.id;
+      filtered.userId = this.state.user.userId;
     }
 
     return filtered;
@@ -1494,11 +1498,12 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.initState(c);
     const db = c.env.db;
 
-    const queries = q || c.req.queries();
-    const queriesFlat: Record<string, string | string[]> = {};
-    for (const [name, value] of Object.entries(queries)) {
-      queriesFlat[name] = value?.length === 1 ? value[0] : value;
-    }
+    const queriesFlat = q
+      ? Object.entries(q).reduce((acc: Record<string, string | string[]>, [name, value]) => {
+          acc[name] = value?.length === 1 ? value[0] : value;
+          return acc;
+        }, {})
+      : { ...c.var.query };
 
     const {
       _fields,
@@ -1621,7 +1626,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const db = c.env.db;
     const { id } = c.req.param();
 
-    const { _fields, _lang, _join, ...whereWithParams } = c.req.query();
+    const { _fields, _lang, _join, ...whereWithParams } = c.var.query;
 
     // FIX: validate user-supplied WHERE keys
     const where: Record<string, string> = {};
@@ -1666,7 +1671,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.initState(c);
 
     // FIX: use Array.isArray instead of heuristic detection
-    const body = await c.req.json();
+    const body = c.var.body as Record<string, unknown> | Record<string, unknown>[];
     const data = this.updateIncomingData(c, body as Record<string, unknown> | Record<string, unknown>[]);
 
     const validatedData = Array.isArray(data)
@@ -1708,7 +1713,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const rows = this.state.rows;
     if (rows.isDeleted) whereClause.isDeleted = false;
 
-    const rawData = await c.req.json();
+    const rawData = (c.var.body || {}) as Record<string, unknown>;
 
     // FIX: filter update data through table columns (same as add)
     const data = this.filterDataByTableColumns(rawData as Record<string, unknown>, rows);
@@ -2527,7 +2532,7 @@ describe('Hidden fields', () => {
       queries: { _limit: ['10'] },
       queryResult: [{ id: 1, name: 'Alice', email: 'a@b.com', userId: 42 }],
       countResult: 1,
-      user: { id: 42 },
+      user: { userId: 42 },
       roles: mockRoles,
     });
 
@@ -3060,4 +3065,3 @@ describe('Routings', () => {
   });
 });
 ```
-

@@ -2,7 +2,7 @@ import type { Context, MiddlewareHandler, Handler } from 'hono';
 import type { H } from 'hono/types';
 import type { Knex } from 'knex';
 export type { MiddlewareHandler, Handler };
-export type MethodsType = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE' | 'OPTIONS';
+export type MethodsType = 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'OPTIONS';
 export type MethodPathType = {
     method?: MethodsType;
     path: string;
@@ -13,15 +13,36 @@ export type RoutesType = MethodPathType & {
 export type PushToRoutesParamsType = MethodPathType & {
     fnArr: H[];
 };
-export type ColumnInfo = {
+export type DbColumnInfo = {
+    column_name?: string;
     data_type: 'string' | 'integer' | 'boolean' | 'file' | 'date' | 'timestamp' | 'json' | 'jsonb' | 'text' | 'uuid' | (string & {});
     is_nullable: 'YES' | 'NO';
+    table_schema?: string;
+    table_name?: string;
     column_default?: string | null;
+    udt_name?: string;
+    is_primary_key?: boolean;
+    check_min?: number;
+    check_max?: number;
+    check_enum?: unknown[];
+    enum_values?: unknown[];
+    references?: {
+        table_schema: string;
+        constraint_name: string;
+        table_name: string;
+        column_name: string;
+        foreign_table_schema: string;
+        foreign_table_name: string;
+        foreign_column_name: string;
+    };
     character_maximum_length?: number | null;
+    [key: string]: unknown;
 };
-export type ColumnInfoMap = Record<string, ColumnInfo>;
+export type ColumnInfo = DbColumnInfo;
+export type ColumnInfoMap = Record<string, DbColumnInfo>;
 export type UserType = {
-    id: string | number;
+    id?: string | number;
+    userId?: string | number;
     roles?: string[];
     [key: string]: unknown;
 };
@@ -38,26 +59,31 @@ export type ContextServices = {
     dbTables?: Record<string, ColumnInfoMap>;
     roles?: RolesService;
     error?: (code: string, status?: number) => void;
-    getErrorByMessage?: (message: string) => unknown;
+    getErrorByMessage?: (message: string) => RouteErrorType | undefined;
     log?: (...args: unknown[]) => void;
 };
 export type EnvBindings = ContextServices;
 export type VarBindings = ContextServices & {
+    body?: unknown;
+    bodyType?: string;
+    query?: Record<string, string | string[]>;
+    appendQueryParams?: (params: Record<string, unknown>) => void;
     user?: UserType;
     result?: unknown;
     meta?: metaType | Record<string, unknown>;
     relationsData?: Record<string, CrudBuilderOptionsType>;
 };
-export type AppContext = Context<{
-    Bindings: EnvBindings & Record<string, unknown>;
-    Variables: VarBindings & Record<string, unknown>;
-}>;
+export type AppContext = Context<any>;
 export type RouteErrorType = {
     code: number;
     status: number;
     description?: string;
 };
 export type RoutesErrorsType = Record<string, RouteErrorType>;
+export type AdditionalMessageType = {
+    message: string;
+    [key: string]: unknown;
+};
 export type EmailTemplateType = {
     subject?: string;
     text?: string;
@@ -66,6 +92,12 @@ export type EmailTemplateType = {
 export type RoutesEmailTemplatesType = Record<string, EmailTemplateType>;
 export type RoutingsOptionsType = {
     migrationDirs?: string[];
+};
+export type CrudPermissionMeta = {
+    path: string;
+    permissionPrefix: string;
+    methodsConfigured: boolean;
+    tableName: string;
 };
 export type StringRecord = Record<string, string>;
 export type FieldValue = string | number | boolean | null;
@@ -91,12 +123,53 @@ export type CrudBuilderJoinType = {
     byIndex?: number;
     permission?: string;
 };
+export type CrudBuilderFieldRulesType = {
+    hidden?: string[];
+    readOnly?: string[];
+    visibleFor?: Record<string, string[]>;
+    editableFor?: Record<string, string[]>;
+};
 export type CrudBuilderPermissionsType = {
+    methods?: (MethodsType | '*')[];
     protectedMethods?: (MethodsType | '*')[];
     owner?: string[];
     fields?: {
         viewable?: Record<string, string[]>;
         editable?: Record<string, string[]>;
+    };
+};
+export type ValidationType = 'string' | 'number' | 'boolean' | 'date' | 'enum' | 'array' | 'object';
+export type ValidationFieldType = ValidationType | ValidationType[];
+export type ValidationFieldSchema = {
+    type?: ValidationFieldType;
+    required?: boolean;
+    enum?: unknown[];
+    min?: number;
+    max?: number;
+    preprocess?: (value: unknown) => unknown;
+    items?: ValidationFieldSchema;
+    properties?: Record<string, ValidationFieldSchema>;
+    [key: string]: unknown;
+};
+export type ValidationSchema = Record<string, ValidationFieldSchema>;
+export type ValidationErrorItem = {
+    field: string;
+    message: string;
+    expected?: Record<string, unknown>;
+    value: unknown;
+};
+export type ValidationResolverResult = ValidationSchema | ValidationErrorItem[] | {
+    errors?: ValidationErrorItem[];
+} | null | undefined | unknown;
+export type ValidationResolver = (c: AppContext, next: () => Promise<void>) => Promise<ValidationResolverResult> | ValidationResolverResult;
+export type ValidationSection = ValidationSchema | ValidationResolver;
+export type CrudValidationOptions = {
+    params?: ValidationSection;
+    query?: ValidationSection;
+    headers?: ValidationSection;
+    body?: {
+        post?: ValidationSection;
+        patch?: ValidationSection;
     };
 };
 export type CrudAction = 'get' | 'add' | 'update' | 'delete';
@@ -116,6 +189,7 @@ export type CrudBuilderOptionsType<T extends Record<string, unknown> = Record<st
     translate?: string[];
     searchFields?: string[];
     requiredFields?: Record<string, string>;
+    fieldRules?: CrudBuilderFieldRulesType;
     hiddenFields?: string[];
     readOnlyFields?: string[];
     permissions?: CrudBuilderPermissionsType;
@@ -140,6 +214,7 @@ export type CrudBuilderOptionsType<T extends Record<string, unknown> = Record<st
     userIdFieldName?: string;
     additionalFields?: Partial<Record<CrudAction | 'get', Record<string, unknown>>>;
     apiClientMethodNames?: StringRecord;
+    validation?: CrudValidationOptions;
 };
 export type metaType = {
     total: number;
