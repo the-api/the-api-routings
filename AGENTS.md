@@ -1,182 +1,1285 @@
-## Project Overview
+# the-api-routings Project Guide
 
-**the-api-routings** — TypeScript library that provides automatic CRUD endpoint generation
-over PostgreSQL tables for the [the-api](https://github.com/ivanoff/the-api) framework.
+## 1. Prerequisites And Example Database
 
-One call `router.crud({ table: 'users' })` generates 6 REST routes:
-`GET /`, `POST /`, `GET /:id`, `PUT /:id`, `PATCH /:id`, `DELETE /:id`.
+Before using this package in an application, the user should have:
 
-## Tech Stack
-
-- **Runtime:** Bun
-- **Language:** TypeScript (ESNext, strict)
-- **HTTP framework:** Hono
-- **SQL query builder:** Knex (PostgreSQL-oriented)
-- **Build:** `bun build` + `tsc` (declarations only)
-- **Test:** `bun test` (bun:test runner)
-
-## Repository Structure
-
-```
-src/
-├── index.ts            # Barrel export
-├── Routings.ts         # Router class: HTTP method helpers + crud() auto-generator
-├── CrudBuilder.ts      # Core: builds Knex queries for CRUD operations (~550 lines)
-└── types.ts            # All TypeScript types and interfaces
-
-test/
-├── helpers.ts          # Shared mocks: createMockQb, createMockDb, createMockContext
-├── Routings.test.ts    # Routings class tests
-└── CrudBuilder.test.ts # CrudBuilder tests (constructor, where, sort, pagination, CRUD ops)
-
-dist/                   # Build output (gitignored)
-```
-
-## Key Concepts
-
-### Routings (src/Routings.ts)
-- Wraps Hono's `createFactory` for handler creation
-- Methods: `get()`, `post()`, `put()`, `patch()`, `delete()`, `use()`, `all()`
-- `crud(params)` — generates 6 routes, each instantiates a fresh `CrudBuilder`
-- Manages `routesPermissions`, `routesErrors`, `routesEmailTemplates`
-- Accepts `migrationDirs` in constructor options
-
-### CrudBuilder (src/CrudBuilder.ts)
-- One instance per request (created inside route handler)
-- Context comes from Hono's `Context` object:
-  - `c.env.db` — Knex read connection
-  - `c.env.dbWrite` — Knex write connection
-  - `c.env.dbTables` — table schemas keyed by `"schema.table"`
-  - `c.env.roles` — optional roles/permissions service
-  - `c.var.user` — authenticated user (has `.id` and `.roles`)
-- Results are set via `c.set('result', ...)` and `c.set('meta', ...)`
-
-### Query Parameters (GET endpoints)
-| Param | Purpose |
-|---|---|
-| `_fields` | Select specific columns: `?_fields=id,name` |
-| `_sort` | Sort: `?_sort=-created,name,random()` (NULLS LAST) |
-| `_limit`, `_page`, `_skip` | Offset pagination |
-| `_after` | Cursor pagination |
-| `_unlimited` | Disable limit (requires `CAN_GET_UNLIMITED`) |
-| `_lang` | Translation language code |
-| `_search` | Trigram search (`%` and `<->` operators) |
-| `_join` | On-demand joins |
-| `field~` | iLIKE filter |
-| `field!` | NOT / NOT IN filter |
-| `_null_field` | WHERE field IS NULL |
-| `_not_null_field` | WHERE field IS NOT NULL |
-| `_in_field` | WHERE field IN (JSON array) |
-| `_not_in_field` | WHERE field NOT IN (JSON array) |
-| `_from_field` | WHERE field >= value |
-| `_to_field` | WHERE field <= value |
-
-### Soft Delete
-- Column `isDeleted` (boolean) — soft delete flag
-- `deletedReplacements` — field value substitutions for deleted rows
-- `includeDeleted` — show deleted rows with replacements
-
-### Permissions System
-- `permissions.protectedMethods` — methods requiring permission check
-- `permissions.fields.viewable` — fields visible per permission
-- `permissions.owner` — permissions granted to record owner
-- `hiddenFields` — fields stripped from response (SQL-level filtering NOT applied, post-query only)
-
-### Environment Variables
-- `CAN_GET_UNLIMITED` — enables `?_unlimited=true` when set to `'true'`
-- `LIMIT_DEFAULT` — default `_limit` for GET when request has no `_limit`
-- `LIMIT_MAX` — max allowed `_limit` (caps both request `_limit` and `LIMIT_DEFAULT`)
-
-## Commands
+- **Node.js 18+ or Bun 1+**. This repository is built and tested with Bun, but applications can run on Node.js when their own `the-api` setup supports it.
+- **PostgreSQL** running and reachable by the application.
+- **the-api installed in the application**. Install `the-api`, this routing package, Knex, and a PostgreSQL driver:
 
 ```bash
-# Install
-bun install
+bun add the-api the-api-routings knex pg
 
-# Build (JS + declarations)
-bun run build
-
-# Run tests
-bun test
-
-# Run specific test file
-bun test test/CrudBuilder.test.ts
+# or
+npm install the-api the-api-routings knex pg
 ```
 
-## Code Conventions
+Create the tables below before trying the examples in this guide. The examples use camelCase columns, so PostgreSQL identifiers are quoted where required.
 
-- **Naming:** camelCase for fields (`userId`, `timeCreated`, `isDeleted`)
-- **Immutability:** CrudBuilder is created fresh per request, never reused
-- **Errors:** thrown as `new Error('ERROR_CODE')` — uppercase snake_case
-- **DB access:** read via `c.env.db`, write via `c.env.dbWrite` (read replica pattern)
-- **Schema:** default is `'public'`, always used in `getDbWithSchema()`
-- **ReadOnly fields default:** `['id', 'timeCreated', 'timeUpdated', 'timeDeleted', 'isDeleted']`
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-## Writing Tests
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT,
+  password TEXT NOT NULL,
+  roles TEXT[] DEFAULT ARRAY[]::TEXT[],
+  "userId" INTEGER,
+  "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+  "timeCreated" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "timeUpdated" TIMESTAMPTZ,
+  "timeDeleted" TIMESTAMPTZ
+);
 
-Tests use `bun:test` with manual mocks (no real DB):
+CREATE TABLE categories (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
+CREATE TABLE posts (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  body TEXT,
+  status TEXT DEFAULT 'draft',
+  "categoryId" INTEGER REFERENCES categories(id),
+  "userId" INTEGER REFERENCES users(id),
+  "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+  "timeCreated" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "timeUpdated" TIMESTAMPTZ,
+  "timeDeleted" TIMESTAMPTZ
+);
+
+CREATE TABLE comments (
+  id SERIAL PRIMARY KEY,
+  "postId" INTEGER REFERENCES posts(id),
+  "userId" INTEGER REFERENCES users(id),
+  body TEXT NOT NULL,
+  "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+  "timeCreated" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE dict (
+  id SERIAL PRIMARY KEY,
+  lang TEXT NOT NULL,
+  "textKey" TEXT NOT NULL,
+  text TEXT NOT NULL
+);
+```
+
+Minimal seed data for curl examples:
+
+```sql
+INSERT INTO users (name, email, password) VALUES
+  ('Alice', 'alice@example.com', 'secret'),
+  ('Bob', 'bob@example.com', 'secret');
+
+INSERT INTO categories (name) VALUES ('News'), ('Guides');
+
+INSERT INTO posts (title, body, status, "categoryId", "userId") VALUES
+  ('Hello API', 'First post body', 'published', 1, 1),
+  ('Routing Guide', 'CRUD endpoint guide', 'draft', 2, 1);
+
+INSERT INTO comments ("postId", "userId", body) VALUES
+  (1, 2, 'Nice article');
+```
+
+## 2. Project Overview
+
+**the-api-routings** is a TypeScript library that provides route registration and automatic CRUD endpoint generation for PostgreSQL tables in the `the-api` ecosystem.
 
 ```typescript
-import { createMockQb, createMockDb, createMockContext } from './helpers';
+import { Routings } from 'the-api-routings';
 
-// For unit-testing a method:
-const cb = new CrudBuilder({ table: 'testTable' });
-const qb = createMockQb();
-cb.res = qb;
-cb.sort('-name', db);
-expect(qb.orderBy).toHaveBeenCalledWith('name', 'desc', 'last');
+const router = new Routings();
 
-// For testing full CRUD operation:
-const { c, sets } = createMockContext({
-  data: [{ id: 1, name: 'test' }],
-  totalCount: 1,
-  tableRows: { id: {}, name: {} },
-  queries: { _limit: ['10'] },
+router.crud({ table: 'posts' });
+```
+
+Current implemented CRUD routes:
+
+```text
+GET    /posts       # list records
+POST   /posts       # create a record
+GET    /posts/:id   # read one record
+PATCH  /posts/:id   # update one record
+DELETE /posts/:id   # delete or soft-delete one record
+```
+
+There is no `PUT` helper or generated `PUT /:id` route in the current source. If a future change adds full replacement updates, update `MethodsType`, `Routings`, tests, this file, and `docs/` together.
+
+## 3. Tech Stack
+
+- **Runtime for this repository:** Bun.
+- **Language:** TypeScript, ESNext modules.
+- **HTTP framework types:** Hono.
+- **SQL query builder:** Knex, PostgreSQL-oriented SQL.
+- **Build:** `bun build` plus `tsc` declaration emit.
+- **Tests:** `bun test` with manual mocks, no real database.
+
+## 4. Repository Structure
+
+```text
+src/
+|-- index.ts            # Public exports
+|-- Routings.ts         # Router class, HTTP method helpers, crud() registration
+|-- CrudBuilder.ts      # Query builder and CRUD operation implementation
+|-- Validatior.ts       # CRUD validation middleware; filename is intentionally misspelled in repo
+|-- crudConfig.ts       # Normalizes fieldRules into hidden/read-only/permission config
+|-- types.ts            # Public and internal TypeScript types
+`-- flattening.d.ts     # Local declaration for flattening dependency
+
+test/
+|-- helpers.ts          # Knex and Hono context mocks
+|-- Routings.test.ts    # Routings behavior
+|-- CrudBuilder.test.ts # Query, security, pagination, soft delete, options
+`-- Validatior.test.ts  # Generated/custom validation
+
+docs/
+|-- index.html          # Static user documentation
+|-- styles.css          # Documentation styles, based on ../the-api/docs
+`-- app.js              # Documentation interactions, based on ../the-api/docs
+
+dist/                   # Build output, generated by bun run build
+```
+
+## 5. Public Exports
+
+`src/index.ts` exports:
+
+```typescript
+export * from './types';
+export { Routings } from './Routings';
+export { CrudBuilder };
+```
+
+Import the router for application route definitions:
+
+```typescript
+import { Routings } from 'the-api-routings';
+```
+
+Import `CrudBuilder` directly only when a custom handler needs the same query language without registering a full CRUD route.
+
+## 6. Quickstart With the-api
+
+Example application:
+
+```typescript
+import { TheAPI } from 'the-api';
+import { Routings } from 'the-api-routings';
+
+const router = new Routings({
+  migrationDirs: ['./migrations'],
 });
-await cb.get(c);
-expect(sets.result).toHaveLength(1);
-expect(sets.meta.total).toBe(1);
+
+router.crud({
+  table: 'posts',
+  searchFields: ['title', 'body'],
+  defaultSort: '-timeCreated',
+});
+
+const api = new TheAPI({
+  routings: [router],
+});
+
+await api.up();
 ```
 
-Mock architecture:
-- `createMockQb(data)` — chainable Knex query builder mock (all methods return self, `await` resolves to `data`)
-- `createMockDb(data, count)` — callable mock with `.raw()`, `.from().count()`, `.fn.now()`
-- `createMockContext(opts)` — Hono Context mock with `env`, `var`, `req`, `set()`
+Try it:
 
-## Known Gaps (vs legacy koa_knex_helper.js)
+```bash
+curl 'http://localhost:7788/posts?_limit=10&_sort=-timeCreated'
+curl -X POST 'http://localhost:7788/posts' \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"New post","body":"Hello","categoryId":1}'
+```
 
-These features from the old Koa version are NOT yet ported:
+## 7. Routings Class
 
-### Security-critical
-- **Owner-based access control** — no `isFullAccess()` method, no `clone().first()` owner check
-- **`keepUserId` / `needToCheckUserId`** in update/delete — users can modify others' records
+`Routings` stores route metadata for `the-api`.
 
-### Missing query features
-- **`_or` parameter** — OR conditions not extracted from query
-- **`_isNull` parameter** — dedicated isNull shorthand not extracted
-- **`_whereNotIn` from query** — `whereNotIn()` exists but never called from `getRequestResult()`
+### Constructor
 
-### Other
-- **`statusesFromJoin`** — conditional joins by user token statuses
-- **SQLite fallback** in `add()` — `returning('*')` fix for SQLite
-- **Hidden fields SQL-level filtering** — currently post-query only (performance)
-- **Join alias deduplication** from column list in `fields()`
-- **Coalesce-where array OR grouping** — current implementation may produce incorrect SQL with multiple WHERE conditions (uses separate `orWhere` instead of grouped callback)
+```typescript
+const router = new Routings({
+  migrationDirs: ['./migrations'],
+});
+```
 
-## PostgreSQL-Specific Features
+`migrationDirs` is stored on the instance so the parent `the-api` application can collect migration directories.
 
-This library generates PostgreSQL-specific SQL:
-- `COALESCE` subqueries for joins
-- `json_build_object` / `jsonb_agg` for nested data
-- `RANDOM()` for random ordering
-- Trigram operators `%` and `<->` for search (requires `pg_trgm` extension)
-- `NULLS LAST` in ordering
+### HTTP Method Helpers
 
-## Dependencies
+Available helpers:
 
-| Package | Role | External? |
+- `get(path, ...handlers)`
+- `post(path, ...handlers)`
+- `patch(path, ...handlers)`
+- `delete(path, ...handlers)`
+- `use(path, ...handlers)` for middleware-style routes without a method.
+- `all(...handlers)` for wildcard routes.
+
+Each handler is passed through Hono `createFactory().createHandlers()`. When multiple handlers are supplied, the current implementation pushes one route entry per generated handler.
+
+```typescript
+router.get('/health', async (c) => {
+  c.set('result', { ok: true });
+});
+
+router.post('/posts/import', auth, async (c) => {
+  c.set('result', { imported: true });
+});
+```
+
+### Prefix
+
+`prefix(path)` sets the current base path and returns the same router for chaining.
+
+```typescript
+router
+  .prefix('/api/v1')
+  .get('/status', statusHandler)
+  .crud({ table: 'posts' });
+
+// GET /api/v1/status
+// GET /api/v1/posts
+// POST /api/v1/posts
+// GET /api/v1/posts/:id
+// PATCH /api/v1/posts/:id
+// DELETE /api/v1/posts/:id
+```
+
+Calling `prefix()` again switches the current prefix for later registrations.
+
+### crud(options)
+
+`crud()` normalizes configuration, creates validation middleware, and registers five CRUD operations. Each request gets a fresh `CrudBuilder` instance.
+
+```typescript
+router.crud({
+  table: 'posts',
+  prefix: 'articles',
+});
+
+// GET    /articles
+// POST   /articles
+// GET    /articles/:id
+// PATCH  /articles/:id
+// DELETE /articles/:id
+```
+
+### errors()
+
+Registers route error definitions. The broader `the-api` error middleware can resolve thrown `Error.message` values against this map.
+
+```typescript
+router.errors({
+  TITLE_REQUIRED: {
+    code: 1001,
+    status: 400,
+    description: 'Post title is required',
+  },
+});
+
+throw new Error('TITLE_REQUIRED');
+```
+
+### emailTemplates()
+
+Stores templates for email middleware in the parent application.
+
+```typescript
+router.emailTemplates({
+  welcome: {
+    subject: 'Welcome, {{name}}',
+    html: '<h1>Hello {{name}}</h1>',
+  },
+});
+```
+
+## 8. CrudBuilder Context Contract
+
+`CrudBuilder` reads dependencies from `c.var` first, then from `c.env`.
+
+Required for reads:
+
+- `c.var.db` or `c.env.db`: Knex read connection.
+- `c.var.dbTables` or `c.env.dbTables`: table metadata keyed by `"schema.table"`.
+
+Required for writes:
+
+- `c.var.dbWrite` or `c.env.dbWrite`: Knex write connection.
+
+Optional:
+
+- `c.var.roles` or `c.env.roles`: role service with `getPermissions()` and `checkWildcardPermissions()`.
+- `c.var.user`: authenticated user. The code expects `userId` for owner comparisons.
+- `c.var.query`: normalized query object.
+- `c.var.body`: parsed request body.
+- `c.var.appendQueryParams`: helper supplied by the parent app when available.
+
+Results are written into the Hono context:
+
+- `c.set('result', value)`
+- `c.set('meta', value)`
+- `c.set('relationsData', value)`
+
+## 9. CRUD Configuration Reference
+
+`CrudBuilderOptionsType` is the main configuration type. Important options:
+
+| Option | Purpose |
+|---|---|
+| `table` | Required table name. |
+| `schema` | PostgreSQL schema, defaults to `public`. |
+| `prefix` | URL prefix for CRUD routes instead of the table name. |
+| `aliases` | Adds selected aliases, for example `{ userName: 'author' }`. |
+| `join` | Joins that are always selected. |
+| `joinOnDemand` | Joins activated by `?_join=name`. |
+| `leftJoin` | Knex `leftJoin()` triples applied to the base query. |
+| `leftJoinDistinct` | Adds `distinct()` support for left-joined lists. |
+| `lang` | Default translation language, defaults to `en`. |
+| `translate` | Fields translated through the `dict` table when `_lang` is not `en`. |
+| `searchFields` | Fields used by `_search`. Requires PostgreSQL `pg_trgm`. |
+| `requiredFields` | Map of required write fields to error codes. |
+| `fieldRules` | Preferred field visibility/editability config. |
+| `hiddenFields` | Legacy direct hidden fields config. |
+| `readOnlyFields` | Fields removed from POST/PATCH data. |
+| `permissions` | CRUD route and field permissions. |
+| `defaultWhere` | Trusted permanent filters. |
+| `defaultWhereRaw` | Trusted raw SQL filter. |
+| `defaultSort` | Default `_sort` value. |
+| `sortRaw` | Trusted raw sort SQL. |
+| `fieldsRaw` | Additional trusted select expressions. |
+| `includeDeleted` | Include soft-deleted rows in GET. |
+| `deletedReplacements` | Replacement values for soft-deleted rows. |
+| `relations` | Nested CRUD configs for parent app relation handling. |
+| `tokenRequired`, `ownerRequired`, `rootRequired` | Legacy/self-documenting access flags. |
+| `access`, `accessByStatuses` | Legacy/self-documenting access records. |
+| `dbTables` | Direct table metadata fallback, mainly tests/custom usage. |
+| `cache` | Self-documenting cache metadata. |
+| `userIdFieldName` | Owner field name, defaults to `userId`. |
+| `additionalFields` | Extra self-documenting fields for options methods. |
+| `apiClientMethodNames` | Client-generation metadata. |
+| `validation` | Custom validation overrides. |
+
+Example:
+
+```typescript
+router.crud({
+  table: 'posts',
+  schema: 'public',
+  defaultWhere: { status: 'published' },
+  defaultSort: '-timeCreated',
+  searchFields: ['title', 'body'],
+  fieldRules: {
+    hidden: ['password'],
+    readOnly: ['id', 'userId', 'timeCreated', 'timeUpdated', 'isDeleted'],
+    visibleFor: {
+      'posts.view_private': ['email'],
+    },
+  },
+  permissions: {
+    methods: ['POST', 'PATCH', 'DELETE'],
+  },
+});
+```
+
+## 10. Query Parameters
+
+GET list and item endpoints support a compact query language. User-provided sort and where keys are validated against known table columns, aliases, joins, translation joins, and generated coalesce joins.
+
+| Query | Meaning | Example |
 |---|---|---|
-| `hono` | HTTP framework types + factory | Yes (peer-like) |
-| `flattening` | Object flattening for whereBindings | Yes |
-| `knex` | SQL builder types | Dev/peer |
+| `_fields` | Select response fields and join keys. | `?_fields=id,title,category` |
+| `_sort` | Sort by fields. Prefix with `-` for descending. | `?_sort=-timeCreated,title` |
+| `_limit` | Page size. | `?_limit=20` |
+| `_page` | 1-based page number. Invalid or negative values become `1`. | `?_page=2` |
+| `_skip` | Additional offset. Invalid or negative values become `0`. | `?_skip=40` |
+| `_after` | Cursor pagination using the first sort field. | `?_sort=-timeCreated&_after=2026-01-01` |
+| `_unlimited` | Disable limit only when `CAN_GET_UNLIMITED=true`. | `?_unlimited=true` |
+| `_lang` | Translation language. | `?_lang=de` |
+| `_search` | Trigram search over `searchFields`. | `?_search=api` |
+| `_join` | Enable `joinOnDemand` entries. | `?_join=comments` |
+| `field=value` | Equality; repeated values become `WHERE IN`. | `?status=published` |
+| `field~` | Case-insensitive `ILIKE`. | `?title~=api` |
+| `field!` | `WHERE NOT` or `WHERE NOT IN`. | `?status!=archived` |
+| `_null_field` | `WHERE field IS NULL`. | `?_null_timeDeleted=true` |
+| `_not_null_field` | `WHERE field IS NOT NULL`. | `?_not_null_email=true` |
+| `_in_field` | `WHERE field IN`, value must be a JSON array. | `?_in_id=[1,2,3]` |
+| `_not_in_field` | `WHERE field NOT IN`, value must be a JSON array. | `?_not_in_status=["draft"]` |
+| `_from_field` | `WHERE field >= value`. | `?_from_timeCreated=2026-01-01` |
+| `_to_field` | `WHERE field <= value`. | `?_to_timeCreated=2026-12-31` |
+
+Sorting supports `random()` and applies `NULLS LAST` for normal fields.
+
+```bash
+curl 'http://localhost:7788/posts?_fields=id,title&_sort=-timeCreated&_limit=10'
+curl 'http://localhost:7788/posts?_search=api&_limit=5'
+curl 'http://localhost:7788/posts?_in_id=[1,2,3]'
 ```
+
+## 11. Pagination Metadata
+
+Offset pagination response metadata:
+
+```json
+{
+  "total": 42,
+  "limit": 10,
+  "skip": 0,
+  "page": 1,
+  "pages": 5,
+  "nextPage": 2,
+  "nextAfter": "2026-06-17T10%3A00%3A00.000000Z",
+  "isFirstPage": true,
+  "isLastPage": false
+}
+```
+
+Cursor pagination uses only the first `_sort` field:
+
+```bash
+curl 'http://localhost:7788/posts?_sort=-timeCreated,title&_limit=20'
+curl 'http://localhost:7788/posts?_sort=-timeCreated,title&_limit=20&_after=2026-06-17T10:00:00.000000Z'
+```
+
+For descending sort, the cursor comparison is `<`; for ascending sort, it is `>`.
+
+## 12. Joins
+
+Joins are selected as PostgreSQL `COALESCE` subqueries using `json_build_object` and `jsonb_agg`.
+
+### Always-loaded join
+
+```typescript
+router.crud({
+  table: 'posts',
+  join: [
+    {
+      table: 'categories',
+      alias: 'category',
+      where: '"categories"."id" = "posts"."categoryId"',
+      fields: ['id', 'name'],
+      limit: 1,
+      byIndex: 0,
+      defaultValue: null,
+    },
+  ],
+});
+```
+
+### On-demand join
+
+```typescript
+router.crud({
+  table: 'posts',
+  joinOnDemand: [
+    {
+      table: 'comments',
+      alias: 'comments',
+      where: '"comments"."postId" = "posts"."id"',
+      fields: ['id', 'body', 'userId'],
+      orderBy: '"timeCreated" DESC',
+    },
+  ],
+});
+```
+
+```bash
+curl 'http://localhost:7788/posts/1?_join=comments&_fields=id,title,comments'
+```
+
+### Computed scalar join
+
+```typescript
+router.crud({
+  table: 'posts',
+  join: [
+    {
+      table: 'comments',
+      alias: 'commentsCount',
+      field: 'COUNT(*)::int',
+      where: '"comments"."postId" = "posts"."id"',
+      defaultValue: 0,
+    },
+  ],
+});
+```
+
+### whereBindings
+
+`whereBindings` maps named SQL bindings to flattened values from `env`, `params`, or `query`. Database connections and services are removed before flattening.
+
+```typescript
+router.crud({
+  table: 'posts',
+  join: [
+    {
+      table: 'comments',
+      alias: 'myComments',
+      where: '"comments"."postId" = "posts"."id" AND "comments"."userId" = :userId',
+      whereBindings: {
+        userId: 'env.user.userId',
+      },
+    },
+  ],
+});
+```
+
+## 13. Field Rules And Write Filtering
+
+Prefer `fieldRules` for new code. `normalizeCrudConfig()` converts it into `hiddenFields`, `readOnlyFields`, and permission field maps.
+
+```typescript
+router.crud({
+  table: 'users',
+  fieldRules: {
+    hidden: ['password', 'email'],
+    readOnly: ['id', 'timeCreated', 'timeUpdated', 'isDeleted'],
+    visibleFor: {
+      'users.view_email': ['email'],
+    },
+    editableFor: {
+      'users.edit_status': ['status'],
+    },
+  },
+});
+```
+
+Behavior:
+
+- Hidden fields are stripped from results after the query, not at SQL selection time.
+- Hidden fields become read-only when `fieldRules.hidden` is provided.
+- Default read-only fields are `id`, `timeCreated`, `timeUpdated`, `timeDeleted`, and `isDeleted`.
+- POST and PATCH data are filtered to known table columns and non-read-only fields.
+- If the table has `userId` or the configured `userIdFieldName`, writes inject the authenticated `c.var.user.userId`.
+- Empty strings for nullable numeric or date columns are normalized to `null`.
+- Integer columns reject non-numeric values with `INTEGER_REQUIRED`.
+
+## 14. Soft Delete
+
+If the table has an `isDeleted` column:
+
+- `DELETE /table/:id` updates `isDeleted` to `true`.
+- GET queries add `table.isDeleted = false`.
+- PATCH also refuses to update deleted rows by adding `isDeleted = false`.
+
+To include deleted rows:
+
+```typescript
+router.crud({
+  table: 'posts',
+  includeDeleted: true,
+  deletedReplacements: {
+    title: '[deleted]',
+    body: '',
+    comments: 'NULL',
+  },
+});
+```
+
+When `deletedReplacements` is supplied and `includeDeleted` is not explicitly set, `includeDeleted` becomes `true`.
+
+## 15. Permissions
+
+`permissions.methods` and `permissions.protectedMethods` register route-level permission metadata in `router.routesPermissions`. `methods` is the preferred name; `protectedMethods` is the legacy alias.
+
+```typescript
+router.crud({
+  table: 'posts',
+  permissions: {
+    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+  },
+});
+```
+
+Generated permission names use:
+
+```text
+<crud-url-prefix-or-table>.<method-lowercase>
+```
+
+For `router.crud({ table: 'posts' })`, examples are `posts.get`, `posts.post`, `posts.patch`, and `posts.delete`.
+
+Wildcard:
+
+```typescript
+router.crud({
+  table: 'posts',
+  permissions: {
+    protectedMethods: ['*'],
+  },
+});
+```
+
+Field visibility by permission:
+
+```typescript
+router.crud({
+  table: 'users',
+  hiddenFields: ['email'],
+  permissions: {
+    owner: ['users.view_email'],
+    fields: {
+      viewable: {
+        'users.view_email': ['email'],
+      },
+    },
+  },
+});
+```
+
+Owner visibility is evaluated by comparing `result[userIdFieldName]` with `c.var.user.userId`. Route-level owner-based write protection is listed under known gaps below.
+
+## 16. Validation
+
+`crud()` automatically adds validation middleware from `createCrudValidationMiddleware()`.
+
+Generated schemas are based on `dbTables` metadata:
+
+- `params`: primary key, usually `id`.
+- `query`: known columns, query operators, `_fields`, `_sort`, `_join`, `_limit`, `_page`, `_skip`, `_after`, `_unlimited`, `_lang`, `_search`.
+- `headers`: `authorization` as a string.
+- `body.post`: writable columns; NOT NULL columns without defaults are required except `userId`.
+- `body.patch`: same as POST but without required flags.
+
+Supported rule types:
+
+- `string`
+- `number`
+- `boolean`
+- `date`
+- `enum`
+- `array`
+- `object`
+- arrays of types, for example `['object', 'array']`
+
+Example:
+
+```typescript
+router.crud({
+  table: 'posts',
+  validation: {
+    body: {
+      post: {
+        title: { type: 'string', required: true },
+        status: { type: 'enum', enum: ['draft', 'published'] },
+      },
+      patch: {
+        status: { type: 'enum', enum: ['draft', 'published'] },
+      },
+    },
+  },
+});
+```
+
+Disable all validation for a route:
+
+```typescript
+router.crud({
+  table: 'posts',
+  validation: {},
+});
+```
+
+Disable only body validation:
+
+```typescript
+router.crud({
+  table: 'posts',
+  validation: {
+    body: {},
+  },
+});
+```
+
+Use a resolver or external validator:
+
+```typescript
+router.crud({
+  table: 'posts',
+  validation: {
+    body: {
+      post: async (c) => ({
+        title: { type: 'string', required: true },
+      }),
+    },
+  },
+});
+```
+
+Resolvers may return a schema, an array of validation errors, `{ errors }`, or an external validator with `safeParse`, `parse`, or `validate`.
+
+Validation failures set status `400` by default and write:
+
+```json
+{
+  "code": 22,
+  "status": 400,
+  "description": "Validation error",
+  "name": "VALIDATION_ERROR",
+  "additional": [
+    {
+      "field": "body.title",
+      "message": "This field is required but was not provided",
+      "expected": { "type": "string", "required": true },
+      "value": null
+    }
+  ],
+  "error": true
+}
+```
+
+## 17. Translations
+
+Set `translate` and request a non-English `_lang`:
+
+```typescript
+router.crud({
+  table: 'posts',
+  translate: ['title'],
+});
+```
+
+```bash
+curl 'http://localhost:7788/posts?_lang=de&_fields=id,title'
+```
+
+The generated SQL looks up the translated text in `dict` by matching an English text key and requested language. This is PostgreSQL-specific.
+
+## 18. Search
+
+Enable PostgreSQL trigram search:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+```
+
+Configure searchable fields:
+
+```typescript
+router.crud({
+  table: 'posts',
+  searchFields: ['title', 'body'],
+});
+```
+
+Use `_search`:
+
+```bash
+curl 'http://localhost:7788/posts?_search=routing'
+```
+
+When `_search` is present and no `_sort` is supplied, results are ordered by `_search_distance` ascending.
+
+## 19. Programmatic CrudBuilder Usage
+
+Use `CrudBuilder` directly for custom endpoints that should still use the same query language and metadata behavior.
+
+```typescript
+import { CrudBuilder } from 'the-api-routings';
+
+router.get('/my-posts', async (c) => {
+  const crud = new CrudBuilder({
+    table: 'posts',
+    defaultSort: '-timeCreated',
+  });
+
+  const { result, meta } = await crud.getRequestResult(c, {
+    _limit: ['10'],
+    userId: [String(c.var.user?.userId)],
+  });
+
+  c.set('result', result);
+  c.set('meta', meta);
+});
+```
+
+Available operation methods:
+
+- `get(c)`
+- `getRequestResult(c, q?)`
+- `getById(c)`
+- `add(c)`
+- `update(c)`
+- `delete(c)`
+
+Self-documenting methods:
+
+- `optionsGet()`
+- `optionsGetById()`
+- `optionsAdd()`
+- `optionsUpdate()`
+- `optionsDelete()`
+
+## 20. Environment Variables
+
+```dotenv
+# Enables ?_unlimited=true only when the value is exactly "true".
+CAN_GET_UNLIMITED=true
+
+# Default GET limit when no _limit is provided.
+LIMIT_DEFAULT=25
+
+# Caps both request _limit and LIMIT_DEFAULT.
+LIMIT_MAX=100
+```
+
+If `_unlimited=true` is accepted, no SQL limit is applied and `meta.limit` becomes `0`.
+
+## 21. PostgreSQL-Specific Features
+
+The generated SQL uses PostgreSQL features:
+
+- schemas via Knex `withSchema()`;
+- `COALESCE` join subqueries;
+- `json_build_object` and `jsonb_agg`;
+- `RANDOM()`;
+- trigram `%` and `<->` operators;
+- `ILIKE`;
+- `NULLS LAST`;
+- quoted identifiers for camelCase columns.
+
+This package is not database-agnostic in practice.
+
+## 22. Security Notes
+
+Implemented protections:
+
+- Sort fields from `_sort` are checked against known columns, aliases, and joins.
+- Untrusted query filter keys are checked against known columns and generated join keys.
+- POST/PATCH data are filtered to known table columns.
+- Read-only fields are removed from write data.
+- URL params are not merged into insert data.
+- Integer fields reject invalid numeric values.
+- Pagination values are clamped to non-negative offsets.
+
+Known gaps and important limitations:
+
+- Full owner-based route access control is not implemented in `CrudBuilder`.
+- Legacy `keepUserId` / `needToCheckUserId` behavior is not implemented for update/delete.
+- `_or` query extraction is not implemented.
+- `_isNull` shorthand is not implemented.
+- `_whereNotIn` from query is not extracted, although `whereNotIn()` is used for supported operators.
+- `statusesFromJoin` is not implemented.
+- SQLite fallback for `returning('*')` is not implemented.
+- Hidden fields are removed after query execution, not at SQL selection time.
+- Join alias deduplication from `_fields` is limited.
+- Coalesce-where arrays currently use separate `orWhere` calls instead of grouped OR conditions.
+- `CrudBuilderJoinType.permission` exists in the type but is not actively enforced in `CrudBuilder`.
+- `fieldRules.editableFor` is normalized into permissions metadata but write-time permission enforcement is not yet implemented in `CrudBuilder`.
+
+## 23. Development Commands
+
+```bash
+# Install dependencies
+bun install
+
+# Build JavaScript and declarations
+bun run build
+
+# Run all tests
+bun test
+
+# Run focused tests
+bun test test/CrudBuilder.test.ts
+bun test test/Routings.test.ts
+bun test test/Validatior.test.ts
+```
+
+Build output goes to `dist/`. Edit `src/` and tests, then regenerate `dist/` with `bun run build`. Do not hand-edit generated output.
+
+## 24. Testing Patterns
+
+Tests use `bun:test` and manual mocks.
+
+```typescript
+import { expect, it } from 'bun:test';
+import CrudBuilder from '../src/CrudBuilder';
+import { createMockContext } from './helpers';
+
+it('returns a limited list', async () => {
+  const { c, getSet } = createMockContext({
+    dbTables: {
+      'public.posts': {
+        id: { data_type: 'integer', is_nullable: 'NO' },
+        title: { data_type: 'text', is_nullable: 'NO' },
+      },
+    },
+    queries: { _limit: ['10'] },
+    queryResult: [{ id: 1, title: 'Hello' }],
+    countResult: 1,
+  });
+
+  const crud = new CrudBuilder({ table: 'posts' });
+  await crud.get(c);
+
+  expect(getSet('result')).toEqual([{ id: 1, title: 'Hello' }]);
+  expect(getSet('meta')).toMatchObject({ total: 1, limit: 10 });
+});
+```
+
+Mock helpers:
+
+- `createMockKnex()` creates a callable Knex-like object with `raw()`, `from().count()`, and `fn.now()`.
+- `MockQueryBuilder` records chain calls and resolves like a promise.
+- `createMockContext()` creates Hono-like `c.req`, `c.env`, `c.var`, and `c.set()`.
+
+## 25. Code Conventions
+
+- Keep database field names camelCase when matching this ecosystem: `userId`, `timeCreated`, `timeUpdated`, `isDeleted`.
+- Keep errors as `new Error('UPPER_SNAKE_CASE')`.
+- Prefer `fieldRules` over direct `hiddenFields` and `readOnlyFields` in new route configs.
+- Use read DB from `c.var.db`/`c.env.db` and write DB from `c.var.dbWrite`/`c.env.dbWrite`.
+- Keep one `CrudBuilder` instance per request.
+- Treat `defaultWhereRaw`, `sortRaw`, `fieldsRaw`, and join SQL as trusted application code only.
+- Add tests near the behavior being changed, especially for query parsing, permissions metadata, validation, and write filtering.
+
+## 26. FAQ With Request/Response Examples
+
+### Q: How do I create CRUD endpoints for `posts`?
+
+```typescript
+router.crud({ table: 'posts' });
+```
+
+Request:
+
+```bash
+curl 'http://localhost:7788/posts?_limit=2'
+```
+
+Response:
+
+```json
+{
+  "result": [
+    { "id": 1, "title": "Hello API" },
+    { "id": 2, "title": "Routing Guide" }
+  ],
+  "meta": {
+    "total": 2,
+    "limit": 2,
+    "skip": 0,
+    "page": 1,
+    "pages": 1,
+    "isFirstPage": true,
+    "isLastPage": true
+  }
+}
+```
+
+### Q: How do I create a row?
+
+Request:
+
+```bash
+curl -X POST 'http://localhost:7788/posts' \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"New post","body":"Created from curl","categoryId":1}'
+```
+
+Response:
+
+```json
+{
+  "result": {
+    "id": 3,
+    "title": "New post",
+    "body": "Created from curl",
+    "categoryId": 1,
+    "isDeleted": false
+  }
+}
+```
+
+### Q: How do I update a row?
+
+Request:
+
+```bash
+curl -X PATCH 'http://localhost:7788/posts/3' \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"published"}'
+```
+
+Response:
+
+```json
+{
+  "result": {
+    "id": 3,
+    "title": "New post",
+    "status": "published"
+  }
+}
+```
+
+### Q: How do I soft-delete a row?
+
+If the table has `isDeleted`, DELETE updates that flag.
+
+Request:
+
+```bash
+curl -X DELETE 'http://localhost:7788/posts/3'
+```
+
+Response:
+
+```json
+{
+  "result": { "ok": true },
+  "meta": { "countDeleted": 1 }
+}
+```
+
+### Q: How do I select only some fields?
+
+Request:
+
+```bash
+curl 'http://localhost:7788/posts?_fields=id,title,status'
+```
+
+Response:
+
+```json
+{
+  "result": [
+    { "id": 1, "title": "Hello API", "status": "published" }
+  ]
+}
+```
+
+### Q: How do I sort newest first?
+
+Request:
+
+```bash
+curl 'http://localhost:7788/posts?_sort=-timeCreated'
+```
+
+Response:
+
+```json
+{
+  "result": [
+    { "id": 2, "title": "Routing Guide" },
+    { "id": 1, "title": "Hello API" }
+  ]
+}
+```
+
+### Q: How do I filter by status?
+
+Request:
+
+```bash
+curl 'http://localhost:7788/posts?status=published'
+```
+
+Response:
+
+```json
+{
+  "result": [
+    { "id": 1, "title": "Hello API", "status": "published" }
+  ]
+}
+```
+
+### Q: How do I filter by several IDs?
+
+Request:
+
+```bash
+curl 'http://localhost:7788/posts?_in_id=[1,2,3]'
+```
+
+Response:
+
+```json
+{
+  "result": [
+    { "id": 1, "title": "Hello API" },
+    { "id": 2, "title": "Routing Guide" }
+  ]
+}
+```
+
+### Q: How do I search text?
+
+Route config:
+
+```typescript
+router.crud({
+  table: 'posts',
+  searchFields: ['title', 'body'],
+});
+```
+
+Request:
+
+```bash
+curl 'http://localhost:7788/posts?_search=routing'
+```
+
+Response:
+
+```json
+{
+  "result": [
+    { "id": 2, "title": "Routing Guide" }
+  ]
+}
+```
+
+### Q: How do I include comments only when requested?
+
+Route config:
+
+```typescript
+router.crud({
+  table: 'posts',
+  joinOnDemand: [
+    {
+      table: 'comments',
+      alias: 'comments',
+      where: '"comments"."postId" = "posts"."id"',
+      fields: ['id', 'body', 'userId'],
+    },
+  ],
+});
+```
+
+Request:
+
+```bash
+curl 'http://localhost:7788/posts/1?_join=comments&_fields=id,title,comments'
+```
+
+Response:
+
+```json
+{
+  "result": {
+    "id": 1,
+    "title": "Hello API",
+    "comments": [
+      { "id": 1, "body": "Nice article", "userId": 2 }
+    ]
+  }
+}
+```
+
+### Q: How do I hide `password` from responses?
+
+```typescript
+router.crud({
+  table: 'users',
+  fieldRules: {
+    hidden: ['password'],
+  },
+});
+```
+
+Request:
+
+```bash
+curl 'http://localhost:7788/users/1'
+```
+
+Response:
+
+```json
+{
+  "result": {
+    "id": 1,
+    "name": "Alice",
+    "email": "alice@example.com"
+  }
+}
+```
+
+### Q: How do I protect writes with permissions?
+
+```typescript
+router.crud({
+  table: 'posts',
+  permissions: {
+    methods: ['POST', 'PATCH', 'DELETE'],
+  },
+});
+```
+
+The router records:
+
+```json
+{
+  "POST /posts": ["posts.post"],
+  "PATCH /posts/:id": ["posts.patch"],
+  "DELETE /posts/:id": ["posts.delete"]
+}
+```
+
+The parent `the-api` application is responsible for enforcing the route metadata.
+
+### Q: How do I validate POST data?
+
+```typescript
+router.crud({
+  table: 'posts',
+  validation: {
+    body: {
+      post: {
+        title: { type: 'string', required: true },
+        status: { type: 'enum', enum: ['draft', 'published'] },
+      },
+    },
+  },
+});
+```
+
+Bad request:
+
+```bash
+curl -X POST 'http://localhost:7788/posts' \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"unknown"}'
+```
+
+Response:
+
+```json
+{
+  "result": {
+    "name": "VALIDATION_ERROR",
+    "status": 400,
+    "error": true,
+    "additional": [
+      {
+        "field": "body.title",
+        "message": "This field is required but was not provided",
+        "value": null
+      },
+      {
+        "field": "body.status",
+        "message": "Expected one of [draft, published], but received 'unknown'",
+        "value": "unknown"
+      }
+    ]
+  }
+}
+```
+
+### Q: Why are there 10 route entries for one CRUD resource in tests?
+
+There are five HTTP operations, but each generated operation has validation middleware plus the final handler. The current `pushToRoutes()` implementation stores each created handler entry separately, so tests see 10 route records.
+
+### Q: Why is the validator file called `Validatior.ts`?
+
+That is the current filename and import path in the repository. Keep imports consistent unless doing a dedicated rename with compatibility checks.

@@ -1,0 +1,902 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>the-api-routings documentation</title>
+    <meta
+      name="description"
+      content="Documentation for the-api-routings: automatic PostgreSQL CRUD routes for the-api, query parameters, joins, validation, permissions, soft delete, and development."
+    >
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="brand">
+        <a class="brand-mark" href="#overview" aria-label="the-api-routings docs home">RT</a>
+        <div>
+          <strong>the-api-routings</strong>
+          <span>Documentation</span>
+        </div>
+      </div>
+
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="sidebar">
+        Menu
+      </button>
+
+      <div class="topbar-actions">
+        <span class="version-pill">v0.10.1</span>
+        <a class="quiet-link" href="../AGENTS.md">AGENTS.md</a>
+        <a class="quiet-link" href="../README.md">README.md</a>
+      </div>
+    </header>
+
+    <div class="docs-shell">
+      <aside class="sidebar" id="sidebar">
+        <label class="search-label" for="doc-search">Search docs</label>
+        <input id="doc-search" class="search-input" type="search" placeholder="Search CRUD, joins, validation..." autocomplete="off">
+        <nav class="side-nav" aria-label="Main documentation">
+          <a href="#overview">Overview</a>
+          <a href="#prerequisites">Prerequisites</a>
+          <a href="#schema">Example tables</a>
+          <a href="#install">Install</a>
+          <a href="#quickstart">Quickstart</a>
+          <a href="#routes">Routes</a>
+          <a href="#queries">Query parameters</a>
+          <a href="#pagination">Pagination</a>
+          <a href="#joins">Joins</a>
+          <a href="#fields">Fields</a>
+          <a href="#soft-delete">Soft delete</a>
+          <a href="#permissions">Permissions</a>
+          <a href="#validation">Validation</a>
+          <a href="#search">Search</a>
+          <a href="#programmatic">Programmatic use</a>
+          <a href="#reference">Reference</a>
+          <a href="#security">Security notes</a>
+          <a href="#development">Development</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+      </aside>
+
+      <main id="main" class="content">
+        <section id="overview" class="hero" data-section>
+          <div class="hero-copy">
+            <p class="eyebrow">PostgreSQL CRUD for the-api</p>
+            <h1>Generate REST routes from table names</h1>
+            <p class="lead">
+              <code>the-api-routings</code> provides Hono-compatible route metadata and
+              automatic CRUD handlers for PostgreSQL tables in the <code>the-api</code>
+              ecosystem. Configure a table once, then get consistent list, create,
+              read, update, and delete behavior with filtering, joins, validation,
+              permissions metadata, and soft delete support.
+            </p>
+            <div class="hero-actions">
+              <a class="button primary" href="#quickstart">Start building</a>
+              <a class="button secondary" href="#reference">API reference</a>
+            </div>
+          </div>
+
+          <div class="flow-panel" aria-label="CRUD request flow">
+            <div class="flow-step">
+              <span>1</span>
+              <strong>Routings</strong>
+              <small>register paths</small>
+            </div>
+            <div class="flow-arrow">-&gt;</div>
+            <div class="flow-step">
+              <span>2</span>
+              <strong>Validate</strong>
+              <small>schema from dbTables</small>
+            </div>
+            <div class="flow-arrow">-&gt;</div>
+            <div class="flow-step">
+              <span>3</span>
+              <strong>CrudBuilder</strong>
+              <small>Knex query</small>
+            </div>
+            <div class="flow-arrow">-&gt;</div>
+            <div class="flow-step">
+              <span>4</span>
+              <strong>Context</strong>
+              <small>result and meta</small>
+            </div>
+          </div>
+        </section>
+
+        <section id="prerequisites" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Before you start</p>
+            <h2>Prerequisites</h2>
+          </div>
+          <div class="check-grid">
+            <div class="check-item">
+              <strong>Node.js or Bun</strong>
+              <p>Use Node.js 18+ or Bun 1+. This repository itself builds and tests with Bun.</p>
+            </div>
+            <div class="check-item">
+              <strong>the-api</strong>
+              <p>Install <code>the-api</code> in the application that consumes this package.</p>
+            </div>
+            <div class="check-item">
+              <strong>PostgreSQL</strong>
+              <p>CRUD SQL is PostgreSQL-oriented and uses JSON, trigram, ILIKE, and schema features.</p>
+            </div>
+            <div class="check-item">
+              <strong>Example tables</strong>
+              <p>Create the tables in the next section; every curl example uses them.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="schema" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Database setup</p>
+            <h2>Example tables used in this documentation</h2>
+          </div>
+          <p>
+            These tables cover users, posts, categories, comments, soft delete,
+            translations, joins, and search. Quoted identifiers preserve camelCase
+            column names in PostgreSQL.
+          </p>
+          <pre><code class="language-sql">CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT,
+  password TEXT NOT NULL,
+  roles TEXT[] DEFAULT ARRAY[]::TEXT[],
+  "userId" INTEGER,
+  "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+  "timeCreated" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "timeUpdated" TIMESTAMPTZ,
+  "timeDeleted" TIMESTAMPTZ
+);
+
+CREATE TABLE categories (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
+CREATE TABLE posts (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  body TEXT,
+  status TEXT DEFAULT 'draft',
+  "categoryId" INTEGER REFERENCES categories(id),
+  "userId" INTEGER REFERENCES users(id),
+  "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+  "timeCreated" TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "timeUpdated" TIMESTAMPTZ,
+  "timeDeleted" TIMESTAMPTZ
+);
+
+CREATE TABLE comments (
+  id SERIAL PRIMARY KEY,
+  "postId" INTEGER REFERENCES posts(id),
+  "userId" INTEGER REFERENCES users(id),
+  body TEXT NOT NULL,
+  "isDeleted" BOOLEAN NOT NULL DEFAULT false,
+  "timeCreated" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE dict (
+  id SERIAL PRIMARY KEY,
+  lang TEXT NOT NULL,
+  "textKey" TEXT NOT NULL,
+  text TEXT NOT NULL
+);</code></pre>
+
+          <pre><code class="language-sql">INSERT INTO users (name, email, password) VALUES
+  ('Alice', 'alice@example.com', 'secret'),
+  ('Bob', 'bob@example.com', 'secret');
+
+INSERT INTO categories (name) VALUES ('News'), ('Guides');
+
+INSERT INTO posts (title, body, status, "categoryId", "userId") VALUES
+  ('Hello API', 'First post body', 'published', 1, 1),
+  ('Routing Guide', 'CRUD endpoint guide', 'draft', 2, 1);
+
+INSERT INTO comments ("postId", "userId", body) VALUES
+  (1, 2, 'Nice article');</code></pre>
+        </section>
+
+        <section id="install" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Install</p>
+            <h2>Packages and environment</h2>
+          </div>
+          <div class="two-column">
+            <div>
+              <h3>Bun</h3>
+              <pre><code class="language-bash">bun add the-api the-api-routings knex pg</code></pre>
+            </div>
+            <div>
+              <h3>npm</h3>
+              <pre><code class="language-bash">npm install the-api the-api-routings knex pg</code></pre>
+            </div>
+          </div>
+          <pre><code class="language-env">CAN_GET_UNLIMITED=true
+LIMIT_DEFAULT=25
+LIMIT_MAX=100</code></pre>
+          <p class="note">
+            <code>_unlimited=true</code> is accepted only when
+            <code>CAN_GET_UNLIMITED</code> is exactly <code>true</code>. If accepted,
+            no SQL limit is applied and <code>meta.limit</code> becomes <code>0</code>.
+          </p>
+        </section>
+
+        <section id="quickstart" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Quickstart</p>
+            <h2>Register CRUD for a table</h2>
+          </div>
+          <pre><code class="language-ts">import { TheAPI } from 'the-api';
+import { Routings } from 'the-api-routings';
+
+const router = new Routings({
+  migrationDirs: ['./migrations'],
+});
+
+router.crud({
+  table: 'posts',
+  searchFields: ['title', 'body'],
+  defaultSort: '-timeCreated',
+});
+
+const api = new TheAPI({
+  routings: [router],
+});
+
+await api.up();</code></pre>
+
+          <div class="request-response">
+            <div>
+              <h3>Request</h3>
+              <pre><code class="language-bash">curl 'http://localhost:7788/posts?_limit=10&amp;_sort=-timeCreated'</code></pre>
+            </div>
+            <div>
+              <h3>Response</h3>
+              <pre><code class="language-json">{
+  "result": [
+    {
+      "id": 2,
+      "title": "Routing Guide",
+      "status": "draft"
+    },
+    {
+      "id": 1,
+      "title": "Hello API",
+      "status": "published"
+    }
+  ],
+  "meta": {
+    "total": 2,
+    "limit": 10,
+    "page": 1,
+    "pages": 1,
+    "isFirstPage": true,
+    "isLastPage": true
+  }
+}</code></pre>
+            </div>
+          </div>
+        </section>
+
+        <section id="routes" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Routings</p>
+            <h2>Generated and manual routes</h2>
+          </div>
+          <div class="endpoint-list">
+            <div class="endpoint"><span class="method get">GET</span><code>/posts</code><p>List records.</p></div>
+            <div class="endpoint"><span class="method post">POST</span><code>/posts</code><p>Create one record.</p></div>
+            <div class="endpoint"><span class="method get">GET</span><code>/posts/:id</code><p>Read one record.</p></div>
+            <div class="endpoint"><span class="method patch">PATCH</span><code>/posts/:id</code><p>Update one record.</p></div>
+            <div class="endpoint"><span class="method delete">DELETE</span><code>/posts/:id</code><p>Delete or soft-delete one record.</p></div>
+          </div>
+          <div class="callout">
+            <strong>Current implementation note</strong>
+            This package does not currently generate <code>PUT /:id</code>. Add
+            <code>PUT</code> in <code>MethodsType</code>, <code>Routings</code>, tests,
+            and docs together if replacement updates are introduced.
+          </div>
+          <pre><code class="language-ts">const router = new Routings();
+
+router.get('/health', async (c) =&gt; {
+  c.set('result', { ok: true });
+});
+
+router
+  .prefix('/api/v1')
+  .get('/status', statusHandler)
+  .crud({ table: 'posts' });</code></pre>
+        </section>
+
+        <section id="queries" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Query language</p>
+            <h2>Filters, fields, joins, sort, and search</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Query</th><th>Meaning</th><th>Example</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>_fields</code></td><td>Select response fields and join keys.</td><td><code>_fields=id,title,category</code></td></tr>
+                <tr><td><code>_sort</code></td><td>Sort ascending, descending with <code>-</code>, or random.</td><td><code>_sort=-timeCreated,title</code></td></tr>
+                <tr><td><code>_limit</code>, <code>_page</code>, <code>_skip</code></td><td>Offset pagination.</td><td><code>_limit=20&amp;_page=2</code></td></tr>
+                <tr><td><code>_after</code></td><td>Cursor pagination by the first sort field.</td><td><code>_sort=-timeCreated&amp;_after=...</code></td></tr>
+                <tr><td><code>_unlimited</code></td><td>Disable limit when allowed by environment.</td><td><code>_unlimited=true</code></td></tr>
+                <tr><td><code>_lang</code></td><td>Translate configured fields.</td><td><code>_lang=de</code></td></tr>
+                <tr><td><code>_search</code></td><td>Trigram search over <code>searchFields</code>.</td><td><code>_search=routing</code></td></tr>
+                <tr><td><code>_join</code></td><td>Enable <code>joinOnDemand</code>.</td><td><code>_join=comments</code></td></tr>
+                <tr><td><code>field=value</code></td><td>Exact match; repeated values become <code>WHERE IN</code>.</td><td><code>status=published</code></td></tr>
+                <tr><td><code>field~</code></td><td>Case-insensitive <code>ILIKE</code>.</td><td><code>title~=api</code></td></tr>
+                <tr><td><code>field!</code></td><td><code>WHERE NOT</code> or <code>WHERE NOT IN</code>.</td><td><code>status!=archived</code></td></tr>
+                <tr><td><code>_null_field</code></td><td><code>WHERE field IS NULL</code>.</td><td><code>_null_timeDeleted=true</code></td></tr>
+                <tr><td><code>_not_null_field</code></td><td><code>WHERE field IS NOT NULL</code>.</td><td><code>_not_null_email=true</code></td></tr>
+                <tr><td><code>_in_field</code></td><td><code>WHERE field IN</code>; value is a JSON array.</td><td><code>_in_id=[1,2,3]</code></td></tr>
+                <tr><td><code>_not_in_field</code></td><td><code>WHERE field NOT IN</code>; value is a JSON array.</td><td><code>_not_in_status=["draft"]</code></td></tr>
+                <tr><td><code>_from_field</code>, <code>_to_field</code></td><td>Inclusive range filters.</td><td><code>_from_timeCreated=2026-01-01</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <pre><code class="language-bash">curl 'http://localhost:7788/posts?_fields=id,title&amp;_sort=-timeCreated&amp;_limit=10'
+curl 'http://localhost:7788/posts?_search=api&amp;_limit=5'
+curl 'http://localhost:7788/posts?_in_id=[1,2,3]'</code></pre>
+        </section>
+
+        <section id="pagination" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Pagination</p>
+            <h2>Offset and cursor metadata</h2>
+          </div>
+          <div class="request-response">
+            <div>
+              <h3>Offset request</h3>
+              <pre><code class="language-bash">curl 'http://localhost:7788/posts?_limit=1&amp;_page=1'</code></pre>
+            </div>
+            <div>
+              <h3>Meta</h3>
+              <pre><code class="language-json">{
+  "total": 2,
+  "limit": 1,
+  "skip": 0,
+  "page": 1,
+  "pages": 2,
+  "nextPage": 2,
+  "isFirstPage": true,
+  "isLastPage": false
+}</code></pre>
+            </div>
+          </div>
+          <p>
+            Cursor pagination uses the first sort field only. Descending cursors
+            compare with <code>&lt;</code>; ascending cursors compare with <code>&gt;</code>.
+          </p>
+          <pre><code class="language-bash">curl 'http://localhost:7788/posts?_sort=-timeCreated,title&amp;_limit=20'
+curl 'http://localhost:7788/posts?_sort=-timeCreated,title&amp;_limit=20&amp;_after=2026-06-17T10:00:00.000000Z'</code></pre>
+        </section>
+
+        <section id="joins" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Joins</p>
+            <h2>Embed related data with PostgreSQL JSON</h2>
+          </div>
+          <div class="tabs" data-tabs>
+            <div class="tab-list" role="tablist" aria-label="Join examples">
+              <button type="button" role="tab" aria-selected="true" data-tab="join-basic">Always loaded</button>
+              <button type="button" role="tab" aria-selected="false" data-tab="join-demand">On demand</button>
+              <button type="button" role="tab" aria-selected="false" data-tab="join-scalar">Scalar</button>
+            </div>
+            <div class="tab-panel is-active" id="join-basic">
+              <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  join: [
+    {
+      table: 'categories',
+      alias: 'category',
+      where: '"categories"."id" = "posts"."categoryId"',
+      fields: ['id', 'name'],
+      limit: 1,
+      byIndex: 0,
+      defaultValue: null,
+    },
+  ],
+});</code></pre>
+            </div>
+            <div class="tab-panel" id="join-demand">
+              <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  joinOnDemand: [
+    {
+      table: 'comments',
+      alias: 'comments',
+      where: '"comments"."postId" = "posts"."id"',
+      fields: ['id', 'body', 'userId'],
+      orderBy: '"timeCreated" DESC',
+    },
+  ],
+});</code></pre>
+              <pre><code class="language-bash">curl 'http://localhost:7788/posts/1?_join=comments&amp;_fields=id,title,comments'</code></pre>
+            </div>
+            <div class="tab-panel" id="join-scalar">
+              <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  join: [
+    {
+      table: 'comments',
+      alias: 'commentsCount',
+      field: 'COUNT(*)::int',
+      where: '"comments"."postId" = "posts"."id"',
+      defaultValue: 0,
+    },
+  ],
+});</code></pre>
+            </div>
+          </div>
+          <p>
+            Joins are selected as <code>COALESCE</code> subqueries and may use
+            <code>json_build_object</code>, <code>jsonb_agg</code>, custom scalar
+            fields, <code>leftJoin</code>, <code>whereBindings</code>, ordering, and
+            limits.
+          </p>
+        </section>
+
+        <section id="fields" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Fields</p>
+            <h2>Hide, lock, and expose fields</h2>
+          </div>
+          <pre><code class="language-ts">router.crud({
+  table: 'users',
+  fieldRules: {
+    hidden: ['password', 'email'],
+    readOnly: ['id', 'timeCreated', 'timeUpdated', 'isDeleted'],
+    visibleFor: {
+      'users.view_email': ['email'],
+    },
+    editableFor: {
+      'users.edit_status': ['status'],
+    },
+  },
+});</code></pre>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Behavior</th><th>Details</th></tr></thead>
+              <tbody>
+                <tr><td>Hidden fields</td><td>Removed from results after query execution.</td></tr>
+                <tr><td>Read-only fields</td><td>Removed from POST/PATCH data.</td></tr>
+                <tr><td>Write whitelist</td><td>Write bodies are filtered to known table columns.</td></tr>
+                <tr><td>User ownership field</td><td>If present, <code>userId</code> is injected from <code>c.var.user.userId</code>.</td></tr>
+                <tr><td>Nullable numeric/date empty strings</td><td>Normalized to <code>null</code>.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="soft-delete" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Soft delete</p>
+            <h2>Use <code>isDeleted</code> for reversible deletes</h2>
+          </div>
+          <p>
+            If a table has <code>isDeleted</code>, DELETE updates that field to
+            <code>true</code>. GET requests automatically filter out deleted rows
+            unless <code>includeDeleted</code> is enabled.
+          </p>
+          <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  includeDeleted: true,
+  deletedReplacements: {
+    title: '[deleted]',
+    body: '',
+    comments: 'NULL',
+  },
+});</code></pre>
+          <pre><code class="language-bash">curl -X DELETE 'http://localhost:7788/posts/3'</code></pre>
+          <pre><code class="language-json">{
+  "result": { "ok": true },
+  "meta": { "countDeleted": 1 }
+}</code></pre>
+        </section>
+
+        <section id="permissions" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Permissions</p>
+            <h2>Register route and field permission metadata</h2>
+          </div>
+          <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  permissions: {
+    methods: ['POST', 'PATCH', 'DELETE'],
+  },
+});</code></pre>
+          <p>
+            Permission names use <code>&lt;prefix-or-table&gt;.&lt;method&gt;</code>,
+            for example <code>posts.post</code>, <code>posts.patch</code>, and
+            <code>posts.delete</code>. The parent <code>the-api</code> application
+            is responsible for enforcing route metadata.
+          </p>
+          <pre><code class="language-json">{
+  "POST /posts": ["posts.post"],
+  "PATCH /posts/:id": ["posts.patch"],
+  "DELETE /posts/:id": ["posts.delete"]
+}</code></pre>
+          <pre><code class="language-ts">router.crud({
+  table: 'users',
+  hiddenFields: ['email'],
+  permissions: {
+    owner: ['users.view_email'],
+    fields: {
+      viewable: {
+        'users.view_email': ['email'],
+      },
+    },
+  },
+});</code></pre>
+        </section>
+
+        <section id="validation" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Validation</p>
+            <h2>Generated and custom CRUD validation</h2>
+          </div>
+          <p>
+            <code>crud()</code> adds validation middleware generated from
+            <code>dbTables</code>. It validates params, query parameters, headers,
+            POST bodies, and PATCH bodies.
+          </p>
+          <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  validation: {
+    body: {
+      post: {
+        title: { type: 'string', required: true },
+        status: { type: 'enum', enum: ['draft', 'published'] },
+      },
+      patch: {
+        status: { type: 'enum', enum: ['draft', 'published'] },
+      },
+    },
+  },
+});</code></pre>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Rule</th><th>Meaning</th></tr></thead>
+              <tbody>
+                <tr><td><code>type</code></td><td><code>string</code>, <code>number</code>, <code>boolean</code>, <code>date</code>, <code>enum</code>, <code>array</code>, <code>object</code>, or an array of types.</td></tr>
+                <tr><td><code>required</code></td><td>Value must be present and not empty.</td></tr>
+                <tr><td><code>enum</code></td><td>Allowed values.</td></tr>
+                <tr><td><code>min</code>, <code>max</code></td><td>Numeric bounds.</td></tr>
+                <tr><td><code>preprocess</code></td><td>Transform before validation.</td></tr>
+                <tr><td><code>items</code>, <code>properties</code></td><td>Nested array or object rules.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            Set <code>validation: {}</code> to disable all generated validation, or
+            <code>validation: { body: {} }</code> to disable body validation only.
+          </p>
+        </section>
+
+        <section id="search" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Search and translations</p>
+            <h2>Use PostgreSQL trigram and dict lookups</h2>
+          </div>
+          <div class="two-column">
+            <div>
+              <h3>Search</h3>
+              <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  searchFields: ['title', 'body'],
+});</code></pre>
+              <pre><code class="language-bash">curl 'http://localhost:7788/posts?_search=routing'</code></pre>
+            </div>
+            <div>
+              <h3>Translations</h3>
+              <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  translate: ['title'],
+});</code></pre>
+              <pre><code class="language-bash">curl 'http://localhost:7788/posts?_lang=de&amp;_fields=id,title'</code></pre>
+            </div>
+          </div>
+          <p>
+            When <code>_search</code> is used without <code>_sort</code>, results are
+            ordered by generated <code>_search_distance</code> ascending.
+          </p>
+        </section>
+
+        <section id="programmatic" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Programmatic use</p>
+            <h2>Use CrudBuilder inside custom handlers</h2>
+          </div>
+          <pre><code class="language-ts">import { CrudBuilder } from 'the-api-routings';
+
+router.get('/my-posts', async (c) =&gt; {
+  const crud = new CrudBuilder({
+    table: 'posts',
+    defaultSort: '-timeCreated',
+  });
+
+  const { result, meta } = await crud.getRequestResult(c, {
+    _limit: ['10'],
+    userId: [String(c.var.user?.userId)],
+  });
+
+  c.set('result', result);
+  c.set('meta', meta);
+});</code></pre>
+          <p>
+            Public operation methods are <code>get()</code>,
+            <code>getRequestResult()</code>, <code>getById()</code>,
+            <code>add()</code>, <code>update()</code>, and <code>delete()</code>.
+            Self-documenting methods include <code>optionsGet()</code>,
+            <code>optionsAdd()</code>, <code>optionsUpdate()</code>, and
+            <code>optionsDelete()</code>.
+          </p>
+        </section>
+
+        <section id="reference" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Reference</p>
+            <h2>Configuration maps</h2>
+          </div>
+          <h3><code>CrudBuilderOptionsType</code></h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Option</th><th>Purpose</th></tr></thead>
+              <tbody>
+                <tr><td><code>table</code></td><td>Required table name.</td></tr>
+                <tr><td><code>schema</code></td><td>PostgreSQL schema, default <code>public</code>.</td></tr>
+                <tr><td><code>prefix</code></td><td>URL prefix instead of table name.</td></tr>
+                <tr><td><code>aliases</code></td><td>Additional selected aliases.</td></tr>
+                <tr><td><code>join</code>, <code>joinOnDemand</code></td><td>Always-loaded and request-selected joins.</td></tr>
+                <tr><td><code>leftJoin</code>, <code>leftJoinDistinct</code></td><td>Base query left joins.</td></tr>
+                <tr><td><code>searchFields</code>, <code>translate</code></td><td>Search and translated fields.</td></tr>
+                <tr><td><code>fieldRules</code></td><td>Hidden, read-only, visible, and editable field config.</td></tr>
+                <tr><td><code>permissions</code></td><td>Route permissions and field visibility permissions.</td></tr>
+                <tr><td><code>defaultWhere</code>, <code>defaultWhereRaw</code></td><td>Permanent filters.</td></tr>
+                <tr><td><code>defaultSort</code>, <code>sortRaw</code></td><td>Default and trusted raw ordering.</td></tr>
+                <tr><td><code>includeDeleted</code>, <code>deletedReplacements</code></td><td>Soft-delete read behavior.</td></tr>
+                <tr><td><code>relations</code>, <code>relationIdName</code></td><td>Relation metadata for the parent API.</td></tr>
+                <tr><td><code>validation</code></td><td>Generated validation overrides.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Context contract</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Context value</th><th>Purpose</th></tr></thead>
+              <tbody>
+                <tr><td><code>c.var.db</code> or <code>c.env.db</code></td><td>Knex read connection.</td></tr>
+                <tr><td><code>c.var.dbWrite</code> or <code>c.env.dbWrite</code></td><td>Knex write connection.</td></tr>
+                <tr><td><code>c.var.dbTables</code> or <code>c.env.dbTables</code></td><td>Table metadata keyed by <code>schema.table</code>.</td></tr>
+                <tr><td><code>c.var.roles</code> or <code>c.env.roles</code></td><td>Role service with permission helpers.</td></tr>
+                <tr><td><code>c.var.user</code></td><td>Authenticated user; owner checks use <code>userId</code>.</td></tr>
+                <tr><td><code>c.var.query</code>, <code>c.var.body</code></td><td>Normalized query and parsed body.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="security" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Security notes</p>
+            <h2>Implemented protections and known gaps</h2>
+          </div>
+          <div class="two-column">
+            <div>
+              <h3>Implemented</h3>
+              <ul>
+                <li>Sort fields are validated against known fields.</li>
+                <li>Untrusted query filter keys are validated.</li>
+                <li>POST/PATCH data is filtered to known table columns.</li>
+                <li>Read-only fields are removed from writes.</li>
+                <li>URL params are not merged into insert data.</li>
+                <li>Integer fields reject invalid numeric input.</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Known gaps</h3>
+              <ul>
+                <li>Full owner-based route access control is not implemented.</li>
+                <li><code>keepUserId</code> and <code>needToCheckUserId</code> are not ported.</li>
+                <li><code>_or</code>, <code>_isNull</code>, and <code>_whereNotIn</code> query extraction are missing.</li>
+                <li>Hidden fields are removed after query execution.</li>
+                <li>Join-level <code>permission</code> is typed but not enforced.</li>
+                <li><code>fieldRules.editableFor</code> is metadata only today.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="development" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Project work</p>
+            <h2>Build, test, and repository conventions</h2>
+          </div>
+          <pre><code class="language-bash">bun install
+bun run build
+bun test
+bun test test/CrudBuilder.test.ts
+bun test test/Routings.test.ts
+bun test test/Validatior.test.ts</code></pre>
+          <p>
+            Edit <code>src/</code> and tests, then regenerate <code>dist/</code> with
+            <code>bun run build</code>. Tests use manual Knex and Hono context mocks
+            from <code>test/helpers.ts</code>, so no real database is required.
+          </p>
+          <div class="callout">
+            <strong>Filename note</strong>
+            The validator file is currently named <code>Validatior.ts</code>. Keep
+            imports consistent unless doing a dedicated rename with compatibility checks.
+          </div>
+        </section>
+
+        <section id="faq" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Examples</p>
+            <h2>FAQ with request and response samples</h2>
+          </div>
+
+          <h3>How do I create CRUD endpoints for posts?</h3>
+          <pre><code class="language-ts">router.crud({ table: 'posts' });</code></pre>
+          <div class="request-response">
+            <div>
+              <h3>Request</h3>
+              <pre><code class="language-bash">curl 'http://localhost:7788/posts?_limit=2'</code></pre>
+            </div>
+            <div>
+              <h3>Response</h3>
+              <pre><code class="language-json">{
+  "result": [
+    { "id": 1, "title": "Hello API" },
+    { "id": 2, "title": "Routing Guide" }
+  ],
+  "meta": {
+    "total": 2,
+    "limit": 2,
+    "page": 1,
+    "pages": 1
+  }
+}</code></pre>
+            </div>
+          </div>
+
+          <h3>How do I create a row?</h3>
+          <div class="request-response">
+            <div>
+              <h3>Request</h3>
+              <pre><code class="language-bash">curl -X POST 'http://localhost:7788/posts' \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"New post","body":"Created from curl","categoryId":1}'</code></pre>
+            </div>
+            <div>
+              <h3>Response</h3>
+              <pre><code class="language-json">{
+  "result": {
+    "id": 3,
+    "title": "New post",
+    "body": "Created from curl",
+    "categoryId": 1,
+    "isDeleted": false
+  }
+}</code></pre>
+            </div>
+          </div>
+
+          <h3>How do I update and delete a row?</h3>
+          <div class="request-response">
+            <div>
+              <h3>PATCH</h3>
+              <pre><code class="language-bash">curl -X PATCH 'http://localhost:7788/posts/3' \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"published"}'</code></pre>
+            </div>
+            <div>
+              <h3>DELETE</h3>
+              <pre><code class="language-bash">curl -X DELETE 'http://localhost:7788/posts/3'</code></pre>
+            </div>
+          </div>
+
+          <h3>How do I include comments only when requested?</h3>
+          <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  joinOnDemand: [
+    {
+      table: 'comments',
+      alias: 'comments',
+      where: '"comments"."postId" = "posts"."id"',
+      fields: ['id', 'body', 'userId'],
+    },
+  ],
+});</code></pre>
+          <div class="request-response">
+            <div>
+              <h3>Request</h3>
+              <pre><code class="language-bash">curl 'http://localhost:7788/posts/1?_join=comments&amp;_fields=id,title,comments'</code></pre>
+            </div>
+            <div>
+              <h3>Response</h3>
+              <pre><code class="language-json">{
+  "result": {
+    "id": 1,
+    "title": "Hello API",
+    "comments": [
+      { "id": 1, "body": "Nice article", "userId": 2 }
+    ]
+  }
+}</code></pre>
+            </div>
+          </div>
+
+          <h3>How do I hide passwords?</h3>
+          <pre><code class="language-ts">router.crud({
+  table: 'users',
+  fieldRules: {
+    hidden: ['password'],
+  },
+});</code></pre>
+          <pre><code class="language-json">{
+  "result": {
+    "id": 1,
+    "name": "Alice",
+    "email": "alice@example.com"
+  }
+}</code></pre>
+
+          <h3>How do I validate POST data?</h3>
+          <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  validation: {
+    body: {
+      post: {
+        title: { type: 'string', required: true },
+        status: { type: 'enum', enum: ['draft', 'published'] },
+      },
+    },
+  },
+});</code></pre>
+          <pre><code class="language-json">{
+  "result": {
+    "name": "VALIDATION_ERROR",
+    "status": 400,
+    "error": true,
+    "additional": [
+      {
+        "field": "body.title",
+        "message": "This field is required but was not provided",
+        "value": null
+      }
+    ]
+  }
+}</code></pre>
+
+          <h3>Why do tests show 10 route entries for one CRUD resource?</h3>
+          <p>
+            There are five HTTP operations, but each generated operation has
+            validation middleware plus the final handler. The current
+            <code>pushToRoutes()</code> implementation stores each created handler
+            entry separately, so tests see 10 route records.
+          </p>
+        </section>
+      </main>
+
+      <aside class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <nav id="toc-links"></nav>
+      </aside>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
