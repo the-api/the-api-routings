@@ -178,7 +178,7 @@ class CrudBuilder {
     return c.var?.roles || c.env?.roles;
   }
   getCurrentUserId() {
-    return this.state.user?.userId;
+    return this.state.user?.userId ?? this.state.user?.id;
   }
   getDbWithSchema(db) {
     const qb = db(this.table);

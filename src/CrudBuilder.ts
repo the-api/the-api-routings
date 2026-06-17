@@ -226,7 +226,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
   }
 
   private getCurrentUserId(): UserType['userId'] | undefined {
-    return this.state.user?.userId;
+    return this.state.user?.userId ?? this.state.user?.id;
   }
 
   private getDbWithSchema(db: Knex): Knex.QueryBuilder {

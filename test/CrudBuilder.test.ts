@@ -299,6 +299,33 @@ describe('Security: URL params not in body', () => {
     expect(data.name).toBe('New User');
   });
 
+  it('uses configured userIdFieldName when assigning owner on insert', async () => {
+    const ownerColumns = {
+      ...usersColumns,
+      ownerId: { data_type: 'integer', is_nullable: 'NO' },
+    };
+    delete ownerColumns.userId;
+
+    const { c, dbWrite } = buildContext({
+      body: { name: 'Owned User', email: 'owned@example.com' },
+      dbTables: { [`${SCHEMA}.${TABLE}`]: ownerColumns },
+      user: { id: 42 },
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      dbTables: ownerColumns,
+      userIdFieldName: 'ownerId',
+    });
+    await crud.add(c);
+
+    const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
+    const data = insertCalls[0].args[0] as Record<string, unknown>;
+
+    expect(data.ownerId).toBe(42);
+    expect(data).not.toHaveProperty('userId');
+  });
+
   it('injects userId from token into insert data', async () => {
     const { c, dbWrite } = buildContext({
       body: { name: 'New User', email: 'a@b.com', userId: 999 },
@@ -310,6 +337,7 @@ describe('Security: URL params not in body', () => {
 
     const insertCalls = dbWrite.queryBuilder.getAllCalls('insert');
     const data = insertCalls[0].args[0] as Record<string, unknown>;
+
     expect(data.userId).toBe(7);
   });
 });
