@@ -131,6 +131,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
   readonly accessByStatuses: AccessRecord;
   readonly deletedReplacements: FieldRecord | undefined;
   readonly includeDeleted: boolean;
+  readonly visibleFields: string[] | undefined;
   readonly hiddenFields: string[];
   readonly readOnlyFields: string[];
   readonly showFieldsByPermission: Record<string, string[]>;
@@ -171,6 +172,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.includeDeleted = typeof options.includeDeleted === 'boolean'
       ? options.includeDeleted
       : !!options.deletedReplacements;
+    this.visibleFields = options.fields;
     this.hiddenFields = options.hiddenFields || [];
     this.readOnlyFields = options.readOnlyFields || ['id', 'timeCreated', 'timeUpdated', 'timeDeleted', 'isDeleted'];
     this.showFieldsByPermission = options.permissions?.fields?.viewable || {};
@@ -699,6 +701,16 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     for (const key of fields) delete result[key];
   }
 
+  private deleteNonVisibleFieldsFromResult(
+    result: Record<string, unknown> | undefined,
+  ): void {
+    if (!result || !this.visibleFields) return;
+    const visibleFields = new Set(this.visibleFields);
+    for (const key of Object.keys(result)) {
+      if (!visibleFields.has(key)) delete result[key];
+    }
+  }
+
   // -- FIX: data filtering shared by add + update ----------
 
   private filterDataByTableColumns(
@@ -996,6 +1008,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     const hiddenFields = this.getHiddenFields();
     for (const row of result as Record<string, unknown>[]) {
       this.deleteHiddenFieldsFromResult(row, hiddenFields);
+      this.deleteNonVisibleFieldsFromResult(row);
     }
 
     return { result: result as T[], meta };
@@ -1042,6 +1055,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
     const result = await this.state.res.first();
     this.deleteHiddenFieldsFromResult(result as Record<string, unknown> | undefined, this.getHiddenFields());
+    this.deleteNonVisibleFieldsFromResult(result as Record<string, unknown> | undefined);
 
     c.set('result', result);
     c.set('relationsData', this.relations);

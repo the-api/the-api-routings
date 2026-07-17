@@ -344,6 +344,7 @@ Results are written into the Hono context:
 | `translate` | Fields translated through the `dict` table when `_lang` is not `en`. |
 | `searchFields` | Fields used by `_search`. Requires PostgreSQL `pg_trgm`. |
 | `requiredFields` | Map of required write fields to error codes. |
+| `fields` | Allowlist of fields returned by GET list and item endpoints. |
 | `fieldRules` | Preferred field visibility/editability config. |
 | `hiddenFields` | Legacy direct hidden fields config. |
 | `readOnlyFields` | Fields removed from POST/PATCH data. |
@@ -393,7 +394,7 @@ GET list and item endpoints support a compact query language. User-provided sort
 
 | Query | Meaning | Example |
 |---|---|---|
-| `_fields` | Select response fields and join keys. | `?_fields=id,title,category` |
+| `_fields` | Select response fields and join keys. Cannot expand a configured `fields` allowlist. | `?_fields=id,title,category` |
 | `_sort` | Sort by fields. Prefix with `-` for descending. | `?_sort=-timeCreated,title` |
 | `_limit` | Page size. | `?_limit=20` |
 | `_page` | 1-based page number. Invalid or negative values become `1`. | `?_page=2` |
@@ -536,6 +537,7 @@ Prefer `fieldRules` for new code. `normalizeCrudConfig()` converts it into `hidd
 ```typescript
 router.crud({
   table: 'users',
+  fields: ['id', 'name', 'email'],
   fieldRules: {
     hidden: ['password', 'email'],
     readOnly: ['id', 'timeCreated', 'timeUpdated', 'isDeleted'],
@@ -551,6 +553,9 @@ router.crud({
 
 Behavior:
 
+- When `fields` is configured, all other keys are stripped from GET list and item results after the query.
+- Adding a key to `fields` does not bypass the existing hidden-field and permission rules.
+- Request `_fields` can narrow the response but cannot expose keys outside `fields`.
 - Hidden fields are stripped from results after the query, not at SQL selection time.
 - Hidden fields become read-only when `fieldRules.hidden` is provided.
 - Default read-only fields are `id`, `timeCreated`, `timeUpdated`, `timeDeleted`, and `isDeleted`.
@@ -856,6 +861,7 @@ Implemented protections:
 - URL params are not merged into insert data.
 - Integer fields reject invalid numeric values.
 - Pagination values are clamped to non-negative offsets.
+- Configured `fields` acts as a response allowlist for GET list and item endpoints.
 
 Known gaps and important limitations:
 
@@ -866,7 +872,7 @@ Known gaps and important limitations:
 - `_whereNotIn` from query is not extracted, although `whereNotIn()` is used for supported operators.
 - `statusesFromJoin` is not implemented.
 - SQLite fallback for `returning('*')` is not implemented.
-- Hidden fields are removed after query execution, not at SQL selection time.
+- `fields` allowlisting and hidden-field filtering are applied after query execution, not at SQL selection time.
 - Join alias deduplication from `_fields` is limited.
 - Coalesce-where arrays currently use separate `orWhere` calls instead of grouped OR conditions.
 - `CrudBuilderJoinType.permission` exists in the type but is not actively enforced in `CrudBuilder`.

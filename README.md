@@ -185,7 +185,8 @@ router.crud({
   schema: 'public',              // DB schema (default: 'public')
 
   // fields
-  hiddenFields: ['password'],    // stripped from responses
+  fields: ['id', 'name', 'email'], // only these fields are returned by GET
+  hiddenFields: ['password'],    // stripped from responses; takes precedence over fields
   readOnlyFields: ['id', 'timeCreated', 'timeUpdated', 'isDeleted'],
   requiredFields: { title: 'TITLE_REQUIRED' },
   aliases: { userName: 'author' },

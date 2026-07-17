@@ -190,6 +190,7 @@ export type CrudBuilderOptionsType<T extends Record<string, unknown> = Record<st
     searchFields?: string[];
     requiredFields?: Record<string, string>;
     fieldRules?: CrudBuilderFieldRulesType;
+    fields?: string[];
     hiddenFields?: string[];
     readOnlyFields?: string[];
     permissions?: CrudBuilderPermissionsType;

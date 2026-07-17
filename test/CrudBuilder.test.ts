@@ -582,6 +582,62 @@ describe('Hidden fields', () => {
   });
 });
 
+describe('Visible fields', () => {
+  it('keeps only configured fields in list results', async () => {
+    const { c } = buildContext({
+      queries: { _limit: ['10'] },
+      queryResult: [
+        { id: 1, name: 'Alice', email: 'a@b.com', password: 'secret' },
+        { id: 2, name: 'Bob', email: 'b@b.com', password: 'secret' },
+      ],
+      countResult: 2,
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      fields: ['id', 'name'],
+    });
+
+    const { result } = await crud.getRequestResult(c);
+    expect(result).toEqual([
+      { id: 1, name: 'Alice' },
+      { id: 2, name: 'Bob' },
+    ]);
+  });
+
+  it('keeps only configured fields in item results', async () => {
+    const { c, getSet } = buildContext({
+      params: { id: '1' },
+      queryResult: [{ id: 1, name: 'Alice', email: 'a@b.com' }],
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      fields: ['id', 'name'],
+    });
+
+    await crud.getById(c);
+    expect(getSet('result')).toEqual({ id: 1, name: 'Alice' });
+  });
+
+  it('gives hiddenFields precedence over fields', async () => {
+    const { c } = buildContext({
+      queries: { _limit: ['10'] },
+      queryResult: [{ id: 1, name: 'Alice', email: 'a@b.com' }],
+      countResult: 1,
+    });
+
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      fields: ['id', 'name', 'email'],
+      hiddenFields: ['email'],
+    });
+
+    const { result } = await crud.getRequestResult(c);
+    expect(result).toEqual([{ id: 1, name: 'Alice' }]);
+  });
+});
+
 // -- 10. Translations --------------------------------------
 
 describe('Translations', () => {

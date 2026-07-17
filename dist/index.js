@@ -99,6 +99,7 @@ class CrudBuilder {
   accessByStatuses;
   deletedReplacements;
   includeDeleted;
+  visibleFields;
   hiddenFields;
   readOnlyFields;
   showFieldsByPermission;
@@ -134,6 +135,7 @@ class CrudBuilder {
     this.accessByStatuses = options.accessByStatuses || {};
     this.deletedReplacements = options.deletedReplacements;
     this.includeDeleted = typeof options.includeDeleted === "boolean" ? options.includeDeleted : !!options.deletedReplacements;
+    this.visibleFields = options.fields;
     this.hiddenFields = options.hiddenFields || [];
     this.readOnlyFields = options.readOnlyFields || ["id", "timeCreated", "timeUpdated", "timeDeleted", "isDeleted"];
     this.showFieldsByPermission = options.permissions?.fields?.viewable || {};
@@ -537,6 +539,15 @@ class CrudBuilder {
     for (const key of fields)
       delete result[key];
   }
+  deleteNonVisibleFieldsFromResult(result) {
+    if (!result || !this.visibleFields)
+      return;
+    const visibleFields = new Set(this.visibleFields);
+    for (const key of Object.keys(result)) {
+      if (!visibleFields.has(key))
+        delete result[key];
+    }
+  }
   filterDataByTableColumns(data, rows) {
     const filtered = {};
     for (const key of Object.keys(data)) {
@@ -767,6 +778,7 @@ class CrudBuilder {
     const hiddenFields = this.getHiddenFields();
     for (const row of result) {
       this.deleteHiddenFieldsFromResult(row, hiddenFields);
+      this.deleteNonVisibleFieldsFromResult(row);
     }
     return { result, meta };
   }
@@ -803,6 +815,7 @@ class CrudBuilder {
     this.fields({ c, _fields, _join, db });
     const result = await this.state.res.first();
     this.deleteHiddenFieldsFromResult(result, this.getHiddenFields());
+    this.deleteNonVisibleFieldsFromResult(result);
     c.set("result", result);
     c.set("relationsData", this.relations);
   }

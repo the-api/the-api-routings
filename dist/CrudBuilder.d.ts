@@ -23,6 +23,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     readonly accessByStatuses: AccessRecord;
     readonly deletedReplacements: FieldRecord | undefined;
     readonly includeDeleted: boolean;
+    readonly visibleFields: string[] | undefined;
     readonly hiddenFields: string[];
     readonly readOnlyFields: string[];
     readonly showFieldsByPermission: Record<string, string[]>;
@@ -59,6 +60,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     private getJoinFields;
     private getHiddenFields;
     private deleteHiddenFieldsFromResult;
+    private deleteNonVisibleFieldsFromResult;
     private filterDataByTableColumns;
     private normalizeWriteValue;
     private updateData;
