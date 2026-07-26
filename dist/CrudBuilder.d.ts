@@ -13,6 +13,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     readonly requiredFields: Record<string, string>;
     readonly defaultWhere: FieldRecord;
     readonly defaultWhereRaw: string | undefined;
+    readonly defaultWhereRawBindings: StringRecord | undefined;
     readonly defaultSort: string | undefined;
     readonly sortRaw: string | undefined;
     readonly fieldsRaw: string[] | undefined;
@@ -44,6 +45,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     private getDbTablesFromContext;
     private getRolesFromContext;
     private getCurrentUserId;
+    private resolveContextBindings;
+    private applyDefaultWhere;
     private getDbWithSchema;
     private getNormalizedQuery;
     private getSingleValueQuery;

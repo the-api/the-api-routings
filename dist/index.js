@@ -89,6 +89,7 @@ class CrudBuilder {
   requiredFields;
   defaultWhere;
   defaultWhereRaw;
+  defaultWhereRawBindings;
   defaultSort;
   sortRaw;
   fieldsRaw;
@@ -125,6 +126,7 @@ class CrudBuilder {
     this.requiredFields = options.requiredFields || {};
     this.defaultWhere = options.defaultWhere || {};
     this.defaultWhereRaw = options.defaultWhereRaw;
+    this.defaultWhereRawBindings = options.defaultWhereRawBindings;
     this.defaultSort = options.defaultSort;
     this.sortRaw = options.sortRaw;
     this.fieldsRaw = options.fieldsRaw;
@@ -181,6 +183,39 @@ class CrudBuilder {
   }
   getCurrentUserId() {
     return this.state.user?.userId ?? this.state.user?.id;
+  }
+  resolveContextBindings(c, bindingPaths) {
+    if (!bindingPaths)
+      return {};
+    const env = {
+      ...c.env,
+      ...c.var
+    };
+    ["db", "dbWrite", "dbTables", "error", "getErrorByMessage", "log"].forEach((key) => delete env[key]);
+    const flattened = flattening({
+      env,
+      params: c.req.param(),
+      query: this.getSingleValueQuery(c)
+    });
+    return Object.entries(bindingPaths).reduce((bindings, [name, path]) => {
+      bindings[name] = flattened[path] ?? null;
+      return bindings;
+    }, {});
+  }
+  applyDefaultWhere(c, db) {
+    this.where(this.defaultWhere, db, { trusted: true });
+    if (!this.defaultWhereRaw)
+      return;
+    const whereStr = this.defaultWhereRaw;
+    const bindingPaths = this.defaultWhereRawBindings;
+    const bindings = this.resolveContextBindings(c, bindingPaths);
+    this.state.res.andWhere(function() {
+      if (bindingPaths) {
+        this.whereRaw(whereStr, bindings);
+      } else {
+        this.whereRaw(whereStr);
+      }
+    });
   }
   getDbWithSchema(db) {
     const qb = db(this.table);
@@ -443,23 +478,7 @@ class CrudBuilder {
       const ff = joinFields?.map((item) => typeof item === "string" ? `'${item}', "${as || table}"."${item}"` : `'${Object.keys(item)[0]}', ${Object.values(item)[0]}`);
       const f2 = ff ? `json_build_object(${ff.join(", ")})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
-      const wb = {};
-      const flatQuery2 = this.getSingleValueQuery(c);
-      if (whereBindings) {
-        const envAll = {
-          ...c.env,
-          ...c.var
-        };
-        ["db", "dbWrite", "dbTables", "error", "getErrorByMessage", "log"].forEach((key) => delete envAll[key]);
-        const dd = flattening({
-          env: envAll,
-          params: c.req.param(),
-          query: flatQuery2
-        });
-        for (const [k, v] of Object.entries(whereBindings)) {
-          wb[k] = dd[v] ?? null;
-        }
-      }
+      const wb = this.resolveContextBindings(c, whereBindings);
       const leftJoinStr = !leftJoin ? "" : typeof leftJoin === "string" ? `LEFT JOIN ${leftJoin}` : `LEFT JOIN "${leftJoin[0]}" ON ${leftJoin[1]} = ${leftJoin[2]}`;
       const index = typeof byIndex === "number" ? `[${byIndex}]` : "";
       const schemaStr = !schema ? "" : `"${schema}".`;
@@ -705,14 +724,8 @@ class CrudBuilder {
     if (_lang)
       this.state.lang = _lang;
     this.fields({ c, _fields, _join, db, _sort });
-    this.where(this.defaultWhere, db, { trusted: true });
+    this.applyDefaultWhere(c, db);
     this.where(where, db);
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.state.res.andWhere(function() {
-        this.whereRaw(whereStr);
-      });
-    }
     if (_search && this.searchFields.length) {
       const whereStr = this.searchFields.map((name) => {
         const searchName = this.state.langJoin[name] || `"${name}"`;
@@ -804,15 +817,10 @@ class CrudBuilder {
     if (this.dbTables?.id?.data_type === "integer" && Number.isNaN(+id)) {
       throw new Error("INTEGER_REQUIRED");
     }
-    this.where({ ...where, [`${this.table}.id`]: id }, db, { trusted: true });
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.state.res.andWhere(function() {
-        this.whereRaw(whereStr);
-      });
-    }
-    this.checkDeleted();
     this.fields({ c, _fields, _join, db });
+    this.where({ ...where, [`${this.table}.id`]: id }, db, { trusted: true });
+    this.applyDefaultWhere(c, db);
+    this.checkDeleted();
     const result = await this.state.res.first();
     this.deleteHiddenFieldsFromResult(result, this.getHiddenFields());
     this.deleteNonVisibleFieldsFromResult(result);

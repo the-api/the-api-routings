@@ -193,7 +193,8 @@ router.crud({
 
   // filtering
   defaultWhere: { tenantId: '1' },
-  defaultWhereRaw: '"publishedAt" IS NOT NULL',
+  defaultWhereRaw: '"publishedAt" IS NOT NULL OR "userId" = :currentUserId',
+  defaultWhereRawBindings: { currentUserId: 'env.user.userId' },
   defaultSort: '-timeCreated',
   searchFields: ['title', 'body'],
 
@@ -327,6 +328,90 @@ joinOnDemand: [{
   orderBy: `"comments"."timeCreated" DESC`,
 }]
 ```
+
+## Relations
+
+`relations` are a normalized alternative to embedding a `join` in every row.
+The main `result` keeps foreign-key values, while the related records are
+deduplicated into top-level maps keyed by their identifier. A relation key is
+normally the foreign-key field from the main result.
+
+```typescript
+router.crud({
+  table: 'posts',
+  relations: {
+    categoryId: {
+      table: 'categories',
+      fields: ['id', 'name'],
+    },
+    userId: {
+      table: 'users',
+      fields: ['id', 'name'],
+    },
+  },
+});
+```
+
+When this router is used by `the-api`, a list request such as
+`GET /posts?_fields=id,title,categoryId,userId` produces this shape:
+
+```json
+{
+  "result": [
+    { "id": 1, "title": "Hello API", "categoryId": 1, "userId": 1 },
+    { "id": 2, "title": "Routing Guide", "categoryId": 2, "userId": 1 }
+  ],
+  "relations": {
+    "categoryId": {
+      "1": { "id": 1, "name": "News" },
+      "2": { "id": 2, "name": "Guides" }
+    },
+    "userId": {
+      "1": { "id": 1, "name": "Alice" }
+    }
+  }
+}
+```
+
+The client resolves a row without searching an array:
+
+```typescript
+const { result: posts, relations } = await api.get('/posts?_fields=id,title,categoryId,userId');
+
+for (const post of posts) {
+  const category = relations.categoryId?.[post.categoryId];
+  const author = relations.userId?.[post.userId];
+  console.log(post.title, category?.name, author?.name);
+}
+```
+
+Keep the foreign-key field in `_fields`; relations are loaded from ids found in
+`result`. A `null`, missing, or unmatched id does not create an entry in the
+relation map. Use `fields` and `fieldRules` in each relation definition to
+return only data that is safe for that relation's consumers.
+
+The target key defaults to `id`. For a foreign key that stores another unique
+column, set `relationIdName`; the response map is then keyed by that column:
+
+```typescript
+relations: {
+  categorySlug: {
+    table: 'categories',
+    relationIdName: 'slug',
+    fields: ['slug', 'name'],
+  },
+}
+
+// relations.categorySlug['news'] => { slug: 'news', name: 'News' }
+```
+
+Use `join` when a response must contain nested data in every row or when the
+relationship is derived by SQL. Use `relations` for ordinary id references in
+lists: each related record is sent once, even when many rows point to it.
+
+`the-api-routings` stores the declarations in `c.var.relationsData`.
+`the-api` provides the middleware that loads the records and serializes the
+top-level `relations` object.
 
 ## Response Format
 

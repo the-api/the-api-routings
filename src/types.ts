@@ -262,6 +262,7 @@ export type CrudBuilderOptionsType<T extends Record<string, unknown> = Record<st
 
   defaultWhere?: FieldRecord;
   defaultWhereRaw?: string;
+  defaultWhereRawBindings?: StringRecord;
   defaultSort?: string;
   sortRaw?: string;
   fieldsRaw?: string[];

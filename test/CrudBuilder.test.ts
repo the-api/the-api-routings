@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import CrudBuilder from '../src/CrudBuilder';
 import {
   createMockContext,
+  MockQueryBuilder,
   usersColumns,
   type MockContextResult,
 } from './helpers';
@@ -58,6 +59,103 @@ describe('Context bindings', () => {
     await crud.add(c);
 
     expect(dbWrite.queryBuilder.hasCalled('insert')).toBe(true);
+  });
+});
+
+describe('Default WHERE filters', () => {
+  const visibilityWhere = 'NOT "users"."isHidden" OR "users"."userId" = :currentUserId';
+
+  function getNestedWhereRaw(db: MockContextResult['db']): unknown[] | undefined {
+    const callback = db.queryBuilder.getCallArgs('andWhere')?.[0];
+    expect(typeof callback).toBe('function');
+
+    const nested = new MockQueryBuilder();
+    (callback as (this: MockQueryBuilder) => void).call(nested);
+    return nested.getCallArgs('whereRaw');
+  }
+
+  it('resolves defaultWhereRaw bindings from the authenticated user for lists', async () => {
+    const context = buildContext({
+      user: { userId: 42 },
+      queries: { _limit: ['10'] },
+    });
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      defaultWhereRaw: visibilityWhere,
+      defaultWhereRawBindings: {
+        currentUserId: 'env.user.userId',
+      },
+    });
+
+    await crud.get(context.c);
+
+    expect(getNestedWhereRaw(context.db)).toEqual([
+      visibilityWhere,
+      { currentUserId: 42 },
+    ]);
+  });
+
+  it('uses null for a missing context binding', async () => {
+    const context = buildContext({
+      queries: { _limit: ['10'] },
+    });
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      defaultWhereRaw: visibilityWhere,
+      defaultWhereRawBindings: {
+        currentUserId: 'env.user.userId',
+      },
+    });
+
+    await crud.get(context.c);
+
+    expect(getNestedWhereRaw(context.db)).toEqual([
+      visibilityWhere,
+      { currentUserId: null },
+    ]);
+  });
+
+  it('keeps unbound defaultWhereRaw compatible', async () => {
+    const context = buildContext({
+      queries: { _limit: ['10'] },
+    });
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      defaultWhereRaw: '"users"."status" IS NOT NULL',
+    });
+
+    await crud.get(context.c);
+
+    expect(getNestedWhereRaw(context.db)).toEqual([
+      '"users"."status" IS NOT NULL',
+    ]);
+  });
+
+  it('applies defaultWhere and bound defaultWhereRaw when reading by id', async () => {
+    const context = buildContext({
+      params: { id: '1' },
+      user: { userId: 42 },
+      queryResult: [{ id: 1, status: 'active', userId: 42 }],
+    });
+    const crud = new CrudBuilder({
+      ...defaultOptions,
+      defaultWhere: { status: 'active' },
+      defaultWhereRaw: visibilityWhere,
+      defaultWhereRawBindings: {
+        currentUserId: 'env.user.userId',
+      },
+    });
+
+    await crud.getById(context.c);
+
+    const whereCalls = context.db.queryBuilder.getAllCalls('where');
+    expect(whereCalls.some((call) =>
+      call.args[0] === 'status' && call.args[1] === 'active',
+    )).toBe(true);
+    expect(getNestedWhereRaw(context.db)).toEqual([
+      visibilityWhere,
+      { currentUserId: 42 },
+    ]);
   });
 });
 

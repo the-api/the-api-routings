@@ -121,6 +121,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
   readonly requiredFields: Record<string, string>;
   readonly defaultWhere: FieldRecord;
   readonly defaultWhereRaw: string | undefined;
+  readonly defaultWhereRawBindings: StringRecord | undefined;
   readonly defaultSort: string | undefined;
   readonly sortRaw: string | undefined;
   readonly fieldsRaw: string[] | undefined;
@@ -160,6 +161,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.requiredFields = options.requiredFields || {};
     this.defaultWhere = options.defaultWhere || {};
     this.defaultWhereRaw = options.defaultWhereRaw;
+    this.defaultWhereRawBindings = options.defaultWhereRawBindings;
     this.defaultSort = options.defaultSort;
     this.sortRaw = options.sortRaw;
     this.fieldsRaw = options.fieldsRaw;
@@ -229,6 +231,50 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
 
   private getCurrentUserId(): UserType['userId'] | undefined {
     return this.state.user?.userId ?? this.state.user?.id;
+  }
+
+  private resolveContextBindings(
+    c: AppContext,
+    bindingPaths?: StringRecord,
+  ): Record<string, unknown> {
+    if (!bindingPaths) return {};
+
+    const env = {
+      ...(c.env as Record<string, unknown>),
+      ...(c.var as Record<string, unknown>),
+    };
+    ['db', 'dbWrite', 'dbTables', 'error', 'getErrorByMessage', 'log']
+      .forEach((key) => delete env[key]);
+
+    const flattened = flattening({
+      env,
+      params: c.req.param(),
+      query: this.getSingleValueQuery(c),
+    }) as Record<string, unknown>;
+
+    return Object.entries(bindingPaths).reduce<Record<string, unknown>>(
+      (bindings, [name, path]) => {
+        bindings[name] = flattened[path] ?? null;
+        return bindings;
+      },
+      {},
+    );
+  }
+
+  private applyDefaultWhere(c: AppContext, db: Knex): void {
+    this.where(this.defaultWhere, db, { trusted: true });
+    if (!this.defaultWhereRaw) return;
+
+    const whereStr = this.defaultWhereRaw;
+    const bindingPaths = this.defaultWhereRawBindings;
+    const bindings = this.resolveContextBindings(c, bindingPaths);
+    this.state.res.andWhere(function (this: Knex.QueryBuilder) {
+      if (bindingPaths) {
+        this.whereRaw(whereStr, bindings);
+      } else {
+        this.whereRaw(whereStr);
+      }
+    });
   }
 
   private getDbWithSchema(db: Knex): Knex.QueryBuilder {
@@ -565,26 +611,7 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       );
       const f2 = ff ? `json_build_object(${ff.join(', ')})` : `"${as || table}".*`;
       const f3 = field || `jsonb_agg(${f2})`;
-      const wb: Record<string, unknown> = {};
-      const flatQuery = this.getSingleValueQuery(c);
-
-      if (whereBindings) {
-        const envAll = {
-          ...(c.env as Record<string, unknown>),
-          ...(c.var as Record<string, unknown>),
-        };
-        ['db', 'dbWrite', 'dbTables', 'error', 'getErrorByMessage', 'log']
-          .forEach((key) => delete envAll[key]);
-
-        const dd: Record<string, unknown> = flattening({
-          env: envAll,
-          params: c.req.param(),
-          query: flatQuery,
-        }) as Record<string, unknown>;
-        for (const [k, v] of Object.entries(whereBindings)) {
-          wb[k] = dd[v] ?? null;
-        }
-      }
+      const wb = this.resolveContextBindings(c, whereBindings);
 
       const leftJoinStr = !leftJoin
         ? ''
@@ -918,15 +945,8 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
     this.fields({ c, _fields: _fields as string, _join, db, _sort: _sort as string });
 
     // FIX: defaultWhere is trusted, user WHERE is validated
-    this.where(this.defaultWhere, db, { trusted: true });
+    this.applyDefaultWhere(c, db);
     this.where(where, db);
-
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr);
-      });
-    }
 
     if (_search && this.searchFields.length) {
       const whereStr = this.searchFields
@@ -1041,17 +1061,10 @@ export default class CrudBuilder<T extends Record<string, unknown> = Record<stri
       throw new Error('INTEGER_REQUIRED');
     }
 
-    this.where({ ...where, [`${this.table}.id`]: id }, db, { trusted: true });
-
-    if (this.defaultWhereRaw) {
-      const whereStr = this.defaultWhereRaw;
-      this.state.res.andWhere(function (this: Knex.QueryBuilder) {
-        this.whereRaw(whereStr);
-      });
-    }
-
-    this.checkDeleted();
     this.fields({ c, _fields, _join, db });
+    this.where({ ...where, [`${this.table}.id`]: id }, db, { trusted: true });
+    this.applyDefaultWhere(c, db);
+    this.checkDeleted();
 
     const result = await this.state.res.first();
     this.deleteHiddenFieldsFromResult(result as Record<string, unknown> | undefined, this.getHiddenFields());

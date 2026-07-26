@@ -47,6 +47,7 @@
           <a href="#queries">Query parameters</a>
           <a href="#pagination">Pagination</a>
           <a href="#joins">Joins</a>
+          <a href="#relations">Relations</a>
           <a href="#fields">Fields</a>
           <a href="#soft-delete">Soft delete</a>
           <a href="#permissions">Permissions</a>
@@ -447,6 +448,71 @@ curl 'http://localhost:7788/posts?_sort=-timeCreated,title&amp;_limit=20&amp;_af
           </p>
         </section>
 
+        <section id="relations" class="doc-section" data-section>
+          <div class="section-heading">
+            <p class="eyebrow">Normalized data</p>
+            <h2>Return related records once with <code>relations</code></h2>
+          </div>
+          <p>
+            Use <code>relations</code> for foreign-key data that clients need
+            alongside a list. Rows keep their ids; the parent
+            <code>the-api</code> application puts each related record in a
+            top-level lookup map. This avoids repeating a category or user in
+            every row.
+          </p>
+          <pre><code class="language-ts">router.crud({
+  table: 'posts',
+  relations: {
+    categoryId: {
+      table: 'categories',
+      fields: ['id', 'name'],
+    },
+    userId: {
+      table: 'users',
+      fields: ['id', 'name'],
+    },
+  },
+});</code></pre>
+          <pre><code class="language-bash">curl 'http://localhost:7788/posts?_fields=id,title,categoryId,userId'</code></pre>
+          <pre><code class="language-json">{
+  "result": [
+    { "id": 1, "title": "Hello API", "categoryId": 1, "userId": 1 },
+    { "id": 2, "title": "Routing Guide", "categoryId": 2, "userId": 1 }
+  ],
+  "relations": {
+    "categoryId": {
+      "1": { "id": 1, "name": "News" },
+      "2": { "id": 2, "name": "Guides" }
+    },
+    "userId": {
+      "1": { "id": 1, "name": "Alice" }
+    }
+  }
+}</code></pre>
+          <pre><code class="language-ts">for (const post of response.result) {
+  const category = response.relations.categoryId?.[post.categoryId];
+  const author = response.relations.userId?.[post.userId];
+  renderPost(post, category?.name, author?.name);
+}</code></pre>
+          <p>
+            Include the foreign-key field in <code>_fields</code>; relations are
+            loaded from ids present in <code>result</code>. Use
+            <code>relationIdName</code> when the target key is not
+            <code>id</code>, for example
+            <code>{ table: 'categories', relationIdName: 'slug', fields: ['slug', 'name'] }</code>
+            for a <code>categorySlug</code> field. A null or missing id has no
+            relation entry. Keep sensitive fields out with the relation's
+            <code>fields</code> or <code>fieldRules</code>.
+          </p>
+          <p>
+            Choose <code>join</code> when every row must embed nested SQL data.
+            Choose <code>relations</code> for ordinary id references in a list:
+            it deduplicates shared records. This package exposes relation
+            metadata through <code>c.var.relationsData</code>; the parent
+            <code>the-api</code> middleware creates the response map.
+          </p>
+        </section>
+
         <section id="fields" class="doc-section" data-section>
           <div class="section-heading">
             <p class="eyebrow">Fields</p>
@@ -664,7 +730,7 @@ router.get('/my-posts', async (c) =&gt; {
                 <tr><td><code>fields</code></td><td>Allowlist of fields returned by GET list and item endpoints.</td></tr>
                 <tr><td><code>fieldRules</code></td><td>Hidden, read-only, visible, and editable field config.</td></tr>
                 <tr><td><code>permissions</code></td><td>Route permissions and field visibility permissions.</td></tr>
-                <tr><td><code>defaultWhere</code>, <code>defaultWhereRaw</code></td><td>Permanent filters.</td></tr>
+                <tr><td><code>defaultWhere</code>, <code>defaultWhereRaw</code>, <code>defaultWhereRawBindings</code></td><td>Permanent filters with optional context bindings.</td></tr>
                 <tr><td><code>defaultSort</code>, <code>sortRaw</code></td><td>Default and trusted raw ordering.</td></tr>
                 <tr><td><code>includeDeleted</code>, <code>deletedReplacements</code></td><td>Soft-delete read behavior.</td></tr>
                 <tr><td><code>relations</code>, <code>relationIdName</code></td><td>Relation metadata for the parent API.</td></tr>
